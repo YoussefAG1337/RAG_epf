@@ -6,6 +6,7 @@ parent: epic-working-rag-tracer
 covers: [CAP-7, T1]
 after: [1]
 risk: high
+status: done
 ---
 
 # Persistence and provider foundation
