@@ -50,8 +50,8 @@ def test_startup_schema_mismatch_prevents_readiness() -> None:
         )
 
     application = create_app(
-        schema_guard=reject_startup,  # type: ignore[arg-type]
-        engine_factory=engine_factory,  # type: ignore[arg-type]
+        schema_guard=reject_startup,
+        engine_factory=engine_factory,
     )
     with pytest.raises(EmbeddingSchemaMismatchError, match="does not match migrated metadata"):
         with TestClient(application):

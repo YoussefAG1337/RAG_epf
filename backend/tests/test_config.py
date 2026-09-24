@@ -1,5 +1,7 @@
 """Tests for structural configuration defaults and secret handling."""
 
+from pathlib import Path
+
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import SettingsConfigDict
 from pytest import MonkeyPatch
@@ -20,6 +22,7 @@ def test_settings_have_offline_defaults(monkeypatch: MonkeyPatch) -> None:
     assert settings.answer_model == "gemini-3.8-flash"
     assert settings.embedding_model == "gemini-embedding-2"
     assert settings.embedding_dimensions == 768
+    assert settings.pdf_source_dir == Path("data/course-pdfs")
     assert settings.gemini_api_key is None
 
 

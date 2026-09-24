@@ -1,6 +1,7 @@
 """Structural runtime configuration for the API scaffold."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     database_name: str = "course_rag"
     database_user: str = "course_rag"
     database_password: SecretStr = SecretStr("local-development-only")
+    pdf_source_dir: Path = Path("data/course-pdfs")
     gemini_api_key: SecretStr | None = None
     answer_model: str = "gemini-3.8-flash"
     embedding_model: str = "gemini-embedding-2"
