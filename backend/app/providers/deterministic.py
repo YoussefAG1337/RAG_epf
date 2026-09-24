@@ -1,5 +1,6 @@
 """Repeatable provider doubles for offline development and tests."""
 
+import json
 from dataclasses import dataclass
 from hashlib import sha256
 
@@ -23,11 +24,26 @@ class DeterministicEmbeddingProvider:
 
 @dataclass(frozen=True)
 class DeterministicGenerationProvider:
-    """Return a configured response, independent of network or model state."""
+    """Return a repeatable evidence-backed JSON response without network access."""
 
-    response: str = "deterministic response"
+    response: str | None = None
 
     async def generate(self, prompt: str) -> str:
         if not prompt.strip():
             raise ValueError("generation prompt must not be empty")
-        return self.response
+        if self.response is not None:
+            return self.response
+        marker = "Evidence:\n"
+        if marker not in prompt:
+            return json.dumps({"claims": []})
+        try:
+            excerpts = json.loads(prompt.rsplit(marker, maxsplit=1)[1])
+            first = excerpts[0]
+            citation_id = first["citation_id"]
+            excerpt = first["excerpt"]
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            return json.dumps({"claims": []})
+        return json.dumps(
+            {"claims": [{"text": excerpt, "citation_ids": [citation_id]}]},
+            ensure_ascii=False,
+        )

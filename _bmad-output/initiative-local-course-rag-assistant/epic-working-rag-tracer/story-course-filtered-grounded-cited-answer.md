@@ -6,6 +6,7 @@ parent: epic-working-rag-tracer
 covers: [CAP-2, CAP-4, CAP-7]
 after: [3]
 risk: high
+status: done
 ---
 
 # Course-filtered grounded cited answer

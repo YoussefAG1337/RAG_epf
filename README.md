@@ -18,6 +18,12 @@ docker compose up --build
 
 Open the web app at <http://localhost:3000>. The readiness panel reports whether the API at <http://localhost:8000/api/v1/readiness> is reachable. PostgreSQL listens on port 5432. The checked-in defaults are for local development only; replace them before using this stack outside your machine. The API container applies Alembic migrations before starting, and its startup check verifies that the database vector schema matches the configured Gemini embedding model and dimensions. Gemini is not called at startup or by readiness, and no API key is needed until a live provider is invoked.
 
+## Ask a course question
+
+After ingesting a PDF, use its course ID in the chat at <http://localhost:3000>, enter a question, and select **Ask**. The default local API uses deterministic embedding and generation providers, so the browser demo and automated checks do not require Gemini credentials. A live provider is configured only on the server.
+
+The API accepts `POST /api/v1/answers/stream` with JSON `{ "course_id": "course-1", "question": "..." }` and returns newline-delimited JSON (`application/x-ndjson`). Each event has `version: 1` and a `type`: supported answers emit one or more `delta` events, then `citations` with filename, one-based physical page, and excerpt, then exactly one terminal `completed` event. Failures emit one safe terminal `error` event. `clarification` and `abstention` are reserved contract event types for later policy work.
+
 ## Ingest one PDF
 
 Place a PDF beneath `data/course-pdfs/` (or set `PDF_SOURCE_DIR` in `.env` to another local directory). Start the database and API so the schema is migrated, then run the one-file command from the repository root:

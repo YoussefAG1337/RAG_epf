@@ -78,7 +78,11 @@ class GeminiGenerationProvider:
         if not prompt.strip():
             raise ValueError("generation prompt must not be empty")
         client = self._get_client()
-        response = await client.aio.models.generate_content(model=self._model, contents=prompt)
+        response = await client.aio.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
         if response.text is None or not response.text.strip():
             raise RuntimeError("Gemini returned no text response")
         return response.text
