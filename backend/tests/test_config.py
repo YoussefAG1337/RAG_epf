@@ -1,6 +1,6 @@
 """Tests for structural configuration defaults and secret handling."""
 
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from pydantic_settings import SettingsConfigDict
 from pytest import MonkeyPatch
 from sqlalchemy.engine import make_url
@@ -40,3 +40,21 @@ def test_database_url_encodes_reserved_password_characters() -> None:
 
     assert make_url(settings.database_url).password == "pa@ss:/?#%"
     assert "pa%40ss%3A%2F%3F%23%25" in settings.database_url
+
+
+def test_embedding_model_and_dimensions_are_locked_to_schema_contract() -> None:
+    import pytest
+
+    with pytest.raises(ValidationError, match="embedding_model"):
+        IsolatedSettings(embedding_model="other-model")
+    with pytest.raises(ValidationError, match="embedding_dimensions"):
+        IsolatedSettings(embedding_dimensions=384)
+
+
+def test_runtime_retrieval_settings_are_semantically_validated() -> None:
+    import pytest
+
+    with pytest.raises(ValidationError, match="retrieval_limit"):
+        IsolatedSettings(retrieval_limit=0)
+    with pytest.raises(ValidationError, match="evidence_minimum_score"):
+        IsolatedSettings(evidence_minimum_score=1.1)

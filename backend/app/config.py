@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -25,6 +25,20 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+
+    @model_validator(mode="after")
+    def validate_runtime_values(self) -> "Settings":
+        """Keep runtime settings compatible with the fixed vector schema contract."""
+
+        if self.embedding_model != "gemini-embedding-2":
+            raise ValueError("embedding_model must be gemini-embedding-2 for the migrated schema")
+        if self.embedding_dimensions != 768:
+            raise ValueError("embedding_dimensions must be 768 for the migrated schema")
+        if self.retrieval_limit < 1:
+            raise ValueError("retrieval_limit must be greater than zero")
+        if not 0.0 <= self.evidence_minimum_score <= 1.0:
+            raise ValueError("evidence_minimum_score must be between zero and one")
+        return self
 
     @property
     def database_url(self) -> str:

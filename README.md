@@ -16,7 +16,7 @@ The defaults work without a `.env` file. Copy `.env.example` to `.env` only when
 docker compose up --build
 ```
 
-Open the web app at <http://localhost:3000>. The readiness panel reports whether the API at <http://localhost:8000/api/v1/readiness> is reachable. PostgreSQL listens on port 5432. The checked-in defaults are for local development only; replace them before using this stack outside your machine. Gemini is not called by readiness and no API key is needed yet.
+Open the web app at <http://localhost:3000>. The readiness panel reports whether the API at <http://localhost:8000/api/v1/readiness> is reachable. PostgreSQL listens on port 5432. The checked-in defaults are for local development only; replace them before using this stack outside your machine. The API container applies Alembic migrations before starting, and its startup check verifies that the database vector schema matches the configured Gemini embedding model and dimensions. Gemini is not called at startup or by readiness, and no API key is needed until a live provider is invoked.
 
 Stop the services with `Ctrl+C`, or run `docker compose down`. Run `docker compose down -v` only when you intend to remove the local database volume.
 
