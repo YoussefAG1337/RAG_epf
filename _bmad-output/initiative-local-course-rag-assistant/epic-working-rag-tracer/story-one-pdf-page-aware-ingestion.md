@@ -7,6 +7,7 @@ covers: [CAP-1, CAP-7]
 after: [2]
 hitl: true
 risk: high
+status: done
 ---
 
 # One-PDF page-aware ingestion
