@@ -1,0 +1,20 @@
+[[epic]]
+id = 6
+slug = "epic-working-rag-tracer"
+title = "Working RAG tracer"
+covers = ["CAP-1", "CAP-2", "CAP-3", "CAP-4", "CAP-7"]
+after = []
+
+[[epic]]
+id = 7
+slug = "epic-reliability-student-experience"
+title = "Reliability and student experience"
+covers = ["CAP-1", "CAP-2", "CAP-3", "CAP-4", "CAP-5", "CAP-6", "CAP-7"]
+after = []
+
+[[epic]]
+id = 8
+slug = "epic-evaluation-hardening"
+title = "Evaluation and hardening"
+covers = ["CAP-8"]
+after = []

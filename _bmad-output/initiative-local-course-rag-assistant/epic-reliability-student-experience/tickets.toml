@@ -1,0 +1,48 @@
+[[entry]]
+id = 1
+type = "story"
+title = "Collection synchronization and idempotency"
+description = "Add deterministic directory discovery, reusable fixture PDFs, per-file validation and diagnostics, byte checksums, course-scoped unchanged-input no-ops, and inserted, updated, unchanged, skipped and failed reporting with nonzero incomplete-sync semantics."
+verify = "A mixed collection commits valid files independently, diagnoses invalid files and empty pages, exits nonzero when incomplete, and an unchanged rerun creates no duplicate writes or embedding calls while course identities remain isolated."
+covers = ["CAP-1", "CAP-7"]
+after = ["6.3"]
+hitl = true
+risk = "high"
+unknown = "The fixture corpus contains only source PDFs; evaluation questions and expected outcomes are deferred to Story 8.1."
+
+[[entry]]
+id = 2
+type = "story"
+title = "Atomic changed-file replacement"
+description = "Classify retained, new, changed and removed chunks deterministically, embed only new or changed content, and apply source replacement transactionally without stale and current chunks coexisting."
+verify = "A changed PDF reuses retained embeddings and exposes only current chunks, while forced embedding or apply failure leaves the previous searchable version intact."
+covers = ["CAP-1", "CAP-7"]
+after = [1]
+hitl = false
+risk = "high"
+unknown = "None; the approved failure rule retains the prior valid version and returns a nonzero synchronization result."
+
+[[entry]]
+id = 3
+type = "story"
+title = "Grounding safety policy"
+description = "Add evidence sufficiency thresholds, clarification for resolvable material ambiguity, materials-insufficient abstention, and a pre-exposure gate requiring every substantive claim citation to resolve to retrieved same-course evidence."
+verify = "Controlled sufficient, ambiguous, unsupported, missing-citation and wrong-course outputs choose the correct terminal state; plausible unsupported claim text never reaches a client delta and invalid grounding ends in abstention."
+covers = ["CAP-2", "CAP-3", "CAP-4", "CAP-6", "CAP-7"]
+after = ["6.5"]
+hitl = false
+risk = "high"
+unknown = "None; clarification is used only when a concise question can resolve known materially different interpretations."
+
+[[entry]]
+id = 4
+type = "story"
+title = "Complete student chat experience"
+description = "Add claim-linked filename, physical-page and excerpt cards, in-memory multi-turn conversation, progress, duplicate prevention, and distinct clarification, abstention, completion and failure presentation without fabricating partial completion."
+verify = "Controlled browser flows show the correct card for every claim with no printed page labels, retain turns in memory, send one request on rapid repeat submission, and render honest progress and terminal states including mid-stream failure."
+covers = ["CAP-3", "CAP-4", "CAP-5", "CAP-6"]
+after = [3]
+hitl = true
+risk = "medium"
+unknown = "Conversation persistence across browser reloads remains outside V1."
+

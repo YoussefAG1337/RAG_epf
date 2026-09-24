@@ -1,0 +1,60 @@
+[[entry]]
+id = 1
+type = "story"
+title = "Application and test scaffold"
+description = "Scaffold FastAPI and Next.js, a PostgreSQL/pgvector Docker Compose service, minimal test/lint/typecheck commands, structural configuration shapes, and a UI-to-API readiness path."
+verify = "From a clean checkout, one documented local command starts the database and both applications, the UI reports API readiness, and the initial automated checks pass."
+covers = ["T1"]
+after = []
+hitl = true
+risk = "medium"
+unknown = "None; the component choices are fixed by the implementation contract."
+
+[[entry]]
+id = 2
+type = "story"
+title = "Persistence and provider foundation"
+description = "Add the course-scoped document/chunk vector schema and migrations, semantic runtime configuration validation, direct thin Gemini embedding and generation interfaces, deterministic doubles, and the model-dimension schema guard."
+verify = "A clean migration exposes every required constraint, index, provenance and vector(768) field, offline provider tests pass, secrets remain server-side, and incompatible embedding configuration prevents startup."
+covers = ["CAP-7", "T1"]
+after = [1]
+hitl = false
+risk = "high"
+unknown = "None; model identifiers and the 768-dimensional schema are fixed by the specification."
+
+[[entry]]
+id = 3
+type = "story"
+title = "One-PDF page-aware ingestion"
+description = "Add a validated local command that uses pypdf to extract one searchable PDF, creates deterministic page-aware chunks, obtains controlled embeddings, and persists them under the requested course."
+verify = "A test PDF becomes searchable with stable chunk order, one-based physical-page provenance and 768-dimensional vectors, while the same source ingested under two course IDs remains isolated."
+covers = ["CAP-1", "CAP-7"]
+after = [2]
+hitl = true
+risk = "high"
+unknown = "Unchanged rerun and collection synchronization behavior are intentionally deferred to Story 7.1."
+
+[[entry]]
+id = 4
+type = "story"
+title = "Course-filtered grounded cited answer"
+description = "Embed a question, filter pgvector retrieval by course before ranking, preserve provenance, call gemini-3.8-flash through the controlled direct boundary using only the question, grounding instructions and selected excerpts, and validate structured claim citation IDs."
+verify = "A closer wrong-course vector is excluded, the provider receives no other factual context, and every substantive supported claim resolves to same-course filename, physical page, and excerpt evidence."
+covers = ["CAP-2", "CAP-4", "CAP-7"]
+after = [3]
+hitl = false
+risk = "high"
+unknown = "Insufficient and ambiguous evidence policy is intentionally deferred to Story 7.3."
+
+[[entry]]
+id = 5
+type = "story"
+title = "Streaming endpoint and basic browser chat"
+description = "Expose the supported path through a versioned typed stream defining delta, citations, completion, clarification, abstention and error events, and render prompt, incremental answer and basic citation metadata in Next.js."
+verify = "The controlled path runs from the ingested PDF through the browser, answer deltas arrive before exactly one terminal completion without duplication, citation metadata is visible, and no events appear after termination."
+covers = ["CAP-3", "CAP-4"]
+after = [4]
+hitl = true
+risk = "medium"
+unknown = "Clarification and abstention event types are defined here; their decision behavior and final presentation are delivered in Epic 7."
+

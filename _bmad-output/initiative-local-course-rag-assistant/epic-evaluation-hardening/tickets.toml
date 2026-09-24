@@ -1,0 +1,35 @@
+[[entry]]
+id = 1
+type = "story"
+title = "Evaluation dataset and runner"
+description = "Add a validated text-diff-friendly dataset with at least two factual, multi-passage, ambiguous and unsupported cases tied to stable fixture PDFs, plus a controlled local runner that records evidence, outcome, citations and latency in machine-readable and concise human-readable reports."
+verify = "Dataset validation proves every required field, category count and filename/page reference with no embeddings or expected provider prose, and one controlled run emits complete per-case records in both report forms."
+covers = ["CAP-8"]
+after = ["7.1", "6.5"]
+hitl = false
+risk = "medium"
+unknown = "Semantic and deterministic acceptance checks are intentionally deferred to Story 8.2."
+
+[[entry]]
+id = 2
+type = "story"
+title = "Deterministic and semantic evaluation checks"
+description = "Implement structural course-isolation, citation-resolution, expected-page and abstention checks with all-pass failure semantics, plus a controlled model-judge boundary and documented required-evidence and forbidden-claim rubric with case-level manual acceptance."
+verify = "Valid and deliberately invalid fixtures prove every structural check and nonzero failure behavior, controlled semantic fixtures expose every rubric result for manual acceptance, and no aggregate score or threshold is produced."
+covers = ["CAP-8"]
+after = [1, "7.3"]
+hitl = true
+risk = "medium"
+unknown = "A live Gemini evaluation remains optional and must be explicitly enabled."
+
+[[entry]]
+id = 3
+type = "story"
+title = "Full integration verification and final hardening"
+description = "Run the clean local product through collection rerun and replacement, course-isolated supported and unsafe answer paths, browser citations and failure states, and full evaluation, then apply only refactoring and hardening justified by observed findings."
+verify = "A clean controlled run proves CAP-1 through CAP-8, one-based physical pages, model-schema compatibility, nonzero ingestion and evaluation failures, no default live Gemini, no LangChain or LlamaIndex, no aggregate semantic threshold, and leaves tests, linting and type checks green."
+covers = ["CAP-8", "H1"]
+after = ["7.2", "7.4", 2]
+hitl = true
+risk = "high"
+unknown = "No deferred feature scope may be introduced; feature gaps become new tickets instead of being hidden in hardening."
