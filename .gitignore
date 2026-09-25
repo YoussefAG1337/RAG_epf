@@ -1,0 +1,33 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js / Next.js
+node_modules/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Local course content
+data/
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# BMad renders immutable, content-addressed workflow snapshots on demand.
+_bmad/render/
+.agents/
+_bmad-output/

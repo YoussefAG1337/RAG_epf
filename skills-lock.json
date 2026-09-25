@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "skills": {
+    "bmad": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad/SKILL.md",
+      "computedHash": "b60ef832156add9677092c97bc0de7f01e583d303edc7630f83fe78925f7c1e3"
+    },
+    "bmad-build": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-build/SKILL.md",
+      "computedHash": "d0a085a2eef3d46624e9c044ea1037264d0f75985b4f2ad03e3e9ac6e654b627"
+    },
+    "bmad-code-review": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-code-review/SKILL.md",
+      "computedHash": "813c5f88f11bb8fb7d0a8de567e9972960edafa93be4c162cfd00ca6e8402875"
+    },
+    "bmad-preview-ticketing": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-preview-ticketing/SKILL.md",
+      "computedHash": "5c0b58c59436620fb4086344c2c6f54ef458f6db6f406967169de5817fc33f81"
+    },
+    "bmad-retrospective": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-retrospective/SKILL.md",
+      "computedHash": "d52854e2e190f13a8a9bf5fb784c3455062cb6e698dfccd903909249cb15d9af"
+    },
+    "bmad-spec": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-spec/SKILL.md",
+      "computedHash": "9e174c99a66077d7c41e37c97f4b1b5ace6007464bfcb6f920e1b2bd958cea62"
+    },
+    "bmod-core-tools": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmod-core-tools/SKILL.md",
+      "computedHash": "4ff70ffb4a6f1ac2f72f2966d28c8642b00593485e13f2fdf3a305fb34d2622b"
+    },
+    "bmod-method": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmod-method/SKILL.md",
+      "computedHash": "6b6fea1b66213195ad5ab3382b20c9a2cad82b8ad1d5510b56d937aae80fd708"
+    }
+  }
+}
