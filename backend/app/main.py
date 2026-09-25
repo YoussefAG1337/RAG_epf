@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,7 @@ from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
 )
+from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
 from app.providers.protocols import EmbeddingProvider, GenerationProvider
 from app.schema_guard import validate_embedding_schema
 from app.stream_contract import (
@@ -71,15 +72,49 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        if schema_guard is not None:
-            settings = settings_factory()
-            engine = engine_factory(settings)
-            try:
-                with engine.connect() as connection:
-                    schema_guard(connection, settings)
-            finally:
-                engine.dispose()
-        yield
+        settings = settings_factory()
+        live_providers: list[object] = []
+        try:
+            if settings.rag_provider == "gemini":
+                configured_embedding = embedding_provider or GeminiEmbeddingProvider(
+                    settings.gemini_api_key,
+                    model=settings.embedding_model,
+                    dimensions=settings.embedding_dimensions,
+                )
+                configured_generation = (
+                    generation_provider
+                    or GeminiGenerationProvider(
+                        settings.gemini_api_key, model=settings.answer_model
+                    )
+                )
+                # Validate credentials at startup without making a provider request.
+                if (
+                    settings.gemini_api_key is None
+                    or not settings.gemini_api_key.get_secret_value()
+                ):
+                    raise ValueError("GEMINI_API_KEY is required when RAG_PROVIDER=gemini")
+                if embedding_provider is None:
+                    live_providers.append(configured_embedding)
+                if generation_provider is None:
+                    live_providers.append(configured_generation)
+                application.state.embedding_provider = configured_embedding
+                application.state.generation_provider = configured_generation
+            else:
+                application.state.embedding_provider = embedding_provider
+                application.state.generation_provider = generation_provider
+            if schema_guard is not None:
+                engine = engine_factory(settings)
+                try:
+                    with engine.connect() as connection:
+                        schema_guard(connection, settings)
+                finally:
+                    engine.dispose()
+            yield
+        finally:
+            for provider in live_providers:
+                close = getattr(provider, "close", None)
+                if close is not None:
+                    close()
 
     application = FastAPI(title="Local Course RAG API", version="0.1.0", lifespan=lifespan)
     application.add_middleware(
@@ -118,13 +153,24 @@ def create_app(
                 if factory is None:
                     owned_engine = engine_factory(settings)
                     factory = create_session_factory(owned_engine)
+                selected_embedding_provider = cast(
+                    EmbeddingProvider,
+                    embedding_provider
+                    or getattr(application.state, "embedding_provider", None)
+                    or DeterministicEmbeddingProvider(settings.embedding_dimensions),
+                )
+                selected_generation_provider = cast(
+                    GenerationProvider,
+                    generation_provider
+                    or getattr(application.state, "generation_provider", None)
+                    or DeterministicGenerationProvider(),
+                )
                 answer = await answer_question(
                     question=request.question,
                     course_id=request.course_id,
                     session_factory=factory,
-                    embedding_provider=embedding_provider
-                    or DeterministicEmbeddingProvider(settings.embedding_dimensions),
-                    generation_provider=generation_provider or DeterministicGenerationProvider(),
+                    embedding_provider=selected_embedding_provider,
+                    generation_provider=selected_generation_provider,
                     settings=settings,
                 )
                 for claim_index, claim in enumerate(answer.claims):

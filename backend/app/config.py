@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     database_password: SecretStr = SecretStr("local-development-only")
     pdf_source_dir: Path = Path("data/course-pdfs")
     gemini_api_key: SecretStr | None = None
+    rag_provider: str = "deterministic"
     answer_model: str = "gemini-3.8-flash"
     embedding_model: str = "gemini-embedding-2"
     embedding_dimensions: int = 768
@@ -36,6 +37,12 @@ class Settings(BaseSettings):
             raise ValueError("embedding_model must be gemini-embedding-2 for the migrated schema")
         if self.embedding_dimensions != 768:
             raise ValueError("embedding_dimensions must be 768 for the migrated schema")
+        if self.rag_provider not in {"deterministic", "gemini"}:
+            raise ValueError("rag_provider must be deterministic or gemini")
+        if self.rag_provider == "gemini" and (
+            self.gemini_api_key is None or not self.gemini_api_key.get_secret_value()
+        ):
+            raise ValueError("GEMINI_API_KEY is required when RAG_PROVIDER=gemini")
         if self.retrieval_limit < 1:
             raise ValueError("retrieval_limit must be greater than zero")
         if not 0.0 <= self.evidence_minimum_score <= 1.0:

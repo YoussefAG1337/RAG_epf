@@ -23,6 +23,10 @@ class GeminiEmbeddingProvider:
         self._dimensions = dimensions
         self._client = client
 
+    @property
+    def provider_id(self) -> str:
+        return "gemini"
+
     async def embed(self, text: str) -> list[float]:
         if not text.strip():
             raise ValueError("embedding input must not be empty")

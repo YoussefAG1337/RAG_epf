@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from contextlib import AbstractContextManager
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from pypdf import PdfWriter
@@ -79,6 +81,38 @@ class _FakeSession:
         self.document: Document | None = None
         self.chunks: list[DocumentChunk] = []
 
+    def __enter__(self) -> _FakeSession:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def get(self, model: type[Any], identity: Any) -> Any:
+        if model is Document:
+            return next((item for item in self.factory.documents if item.id == identity), None)
+        return None
+
+    def scalar(self, statement: Any) -> Any:
+        entity = statement.column_descriptions[0].get("entity")
+        if entity is Document:
+            document_id = statement.whereclause.right.value
+            return next((item for item in self.factory.documents if item.id == document_id), None)
+        if entity is DocumentChunk:
+            document_id = statement.whereclause.right.value
+            return sum(chunk.document_id == document_id for chunk in self.factory.chunks)
+        if statement.whereclause is not None:
+            document_id = statement.whereclause.right.value
+            return sum(chunk.document_id == document_id for chunk in self.factory.chunks)
+        return None
+
+    def scalars(self, statement: Any) -> Any:
+        document_id = statement.whereclause.right.value
+        rows = sorted(
+            (chunk for chunk in self.factory.chunks if chunk.document_id == document_id),
+            key=lambda chunk: chunk.chunk_position,
+        )
+        return type("Rows", (), {"all": lambda _self: rows})()
+
     def add(self, item: Any) -> None:
         if isinstance(item, Document):
             self.document = item
@@ -93,28 +127,47 @@ class _FakeTransaction(AbstractContextManager[_FakeSession]):
     def __init__(self, factory: _FakeSessionFactory) -> None:
         self.factory = factory
         self.session = _FakeSession(factory)
+        self.documents_before = copy.deepcopy(factory.documents)
+        self.chunks_before = copy.deepcopy(factory.chunks)
 
     def __enter__(self) -> _FakeSession:
         return self.session
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if exc_type is None and self.factory.fail_commit:
+            self.factory.documents[:] = self.documents_before
+            self.factory.chunks[:] = self.chunks_before
+            self.factory.rollbacks += 1
+            raise IntegrityError("commit", {}, RuntimeError("simulated commit failure"))
         if exc_type is None:
             if self.session.document is not None:
-                self.factory.documents.append(self.session.document)
+                old = next(
+                    (index for index, item in enumerate(self.factory.documents)
+                     if item.id == self.session.document.id),
+                    None,
+                )
+                if old is None:
+                    self.factory.documents.append(self.session.document)
+                else:
+                    self.factory.documents[old] = self.session.document
             self.factory.chunks.extend(self.session.chunks)
         else:
             self.factory.rollbacks += 1
 
 
 class _FakeSessionFactory:
-    def __init__(self, *, fail_bulk: bool = False) -> None:
+    def __init__(self, *, fail_bulk: bool = False, fail_commit: bool = False) -> None:
         self.fail_bulk = fail_bulk
+        self.fail_commit = fail_commit
         self.documents: list[Document] = []
         self.chunks: list[DocumentChunk] = []
         self.rollbacks = 0
 
     def begin(self) -> _FakeTransaction:
         return _FakeTransaction(self)
+
+    def __call__(self) -> _FakeSession:
+        return _FakeSession(self)
 
 
 def _session_factory(factory: _FakeSessionFactory) -> sessionmaker[Session]:
@@ -210,6 +263,151 @@ def test_document_and_chunk_ids_are_stable_for_same_course_source(tmp_path: Path
     assert [chunk.id for chunk in first_database.chunks] == [
         chunk.id for chunk in second_database.chunks
     ]
+
+
+def test_same_checksum_is_reembedded_when_provider_changes(tmp_path: Path) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    (source / "lesson.pdf").write_bytes(_text_pdf(["Semantic course content."]))
+    database = _FakeSessionFactory()
+    first = asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+    old_chunk_text = [chunk.text for chunk in database.chunks]
+    old_chunk_ids = [chunk.id for chunk in database.chunks]
+
+    class GeminiLikeProvider:
+        provider_id = "gemini"
+
+        async def embed(self, _text: str) -> list[float]:
+            return [0.25] * 768
+
+    result = asyncio.run(
+        _run_ingestion(source, "lesson.pdf", "course-a", database, provider=GeminiLikeProvider())
+    )
+
+    assert result.document_id == first.document_id
+    assert len(database.documents) == 1
+    assert database.documents[0].embedding_provider == "gemini"
+    assert [chunk.text for chunk in database.chunks] == old_chunk_text
+    assert [chunk.id for chunk in database.chunks] == old_chunk_ids
+    assert all(chunk.embedding == [0.25] * 768 for chunk in database.chunks)
+
+
+def test_legacy_null_provider_is_reembedded_with_gemini_marker(tmp_path: Path) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    (source / "lesson.pdf").write_bytes(_text_pdf(["Legacy course content."]))
+    database = _FakeSessionFactory()
+    asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+    old_ids = [chunk.id for chunk in database.chunks]
+    database.documents[0].embedding_provider = None
+
+    class GeminiLikeProvider:
+        provider_id = "gemini"
+
+        async def embed(self, _text: str) -> list[float]:
+            return [0.5] * 768
+
+    asyncio.run(
+        _run_ingestion(source, "lesson.pdf", "course-a", database, provider=GeminiLikeProvider())
+    )
+
+    assert database.documents[0].embedding_provider == "gemini"
+    assert [chunk.id for chunk in database.chunks] == old_ids
+    assert all(chunk.embedding == [0.5] * 768 for chunk in database.chunks)
+
+
+def test_legacy_null_provider_failure_preserves_vectors_and_marker(tmp_path: Path) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    (source / "lesson.pdf").write_bytes(_text_pdf(["Legacy course content."]))
+    database = _FakeSessionFactory()
+    asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+    old_vectors = [chunk.embedding[:] for chunk in database.chunks]
+    database.documents[0].embedding_provider = None
+
+    class BrokenGeminiLikeProvider:
+        provider_id = "gemini"
+
+        async def embed(self, _text: str) -> list[float]:
+            raise RuntimeError("provider failure")
+
+    with pytest.raises(IngestionError, match="embedding provider failed"):
+        asyncio.run(
+            _run_ingestion(
+                source, "lesson.pdf", "course-a", database, provider=BrokenGeminiLikeProvider()
+            )
+        )
+
+    assert database.documents[0].embedding_provider is None
+    assert [chunk.embedding for chunk in database.chunks] == old_vectors
+
+
+@pytest.mark.parametrize("corruption", ["count", "identity"])
+def test_provider_change_refuses_chunk_count_or_identity_mismatch(
+    tmp_path: Path, corruption: str
+) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    (source / "lesson.pdf").write_bytes(_text_pdf(["Course content for mismatch check."]))
+    database = _FakeSessionFactory()
+    asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+    old_vectors = [chunk.embedding[:] for chunk in database.chunks]
+    old_provider = database.documents[0].embedding_provider
+    if corruption == "count":
+        database.chunks.pop()
+    else:
+        database.chunks[0].id = UUID("00000000-0000-0000-0000-000000000099")
+    old_rows = copy.deepcopy(database.chunks)
+
+    class GeminiLikeProvider:
+        provider_id = "gemini"
+
+        async def embed(self, _text: str) -> list[float]:
+            return [0.75] * 768
+
+    with pytest.raises(IngestionError, match="chunks do not match"):
+        asyncio.run(
+            _run_ingestion(
+                source, "lesson.pdf", "course-a", database, provider=GeminiLikeProvider()
+            )
+        )
+
+    assert database.documents[0].embedding_provider == old_provider
+    assert [
+        (chunk.id, chunk.chunk_position, chunk.text, chunk.embedding)
+        for chunk in database.chunks
+    ] == [
+        (chunk.id, chunk.chunk_position, chunk.text, chunk.embedding) for chunk in old_rows
+    ]
+    if corruption == "count":
+        assert len(database.chunks) == len(old_vectors) - 1
+
+
+def test_failed_provider_change_transaction_preserves_existing_vectors(tmp_path: Path) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    (source / "lesson.pdf").write_bytes(_text_pdf(["Semantic course content."]))
+    database = _FakeSessionFactory()
+    asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+    old_vectors = [chunk.embedding[:] for chunk in database.chunks]
+    old_provider = database.documents[0].embedding_provider
+    database.fail_commit = True
+
+    class GeminiLikeProvider:
+        provider_id = "gemini"
+
+        async def embed(self, _text: str) -> list[float]:
+            return [0.25] * 768
+
+    with pytest.raises(IngestionError, match="transaction was rolled back"):
+        asyncio.run(
+            _run_ingestion(
+                source, "lesson.pdf", "course-a", database, provider=GeminiLikeProvider()
+            )
+        )
+
+    assert [chunk.embedding for chunk in database.chunks] == old_vectors
+    assert database.documents[0].embedding_provider == old_provider
 
 
 def test_pdf_with_no_usable_text_fails_before_opening_transaction(tmp_path: Path) -> None:

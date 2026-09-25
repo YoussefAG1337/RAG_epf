@@ -10,7 +10,7 @@ This repository contains the local application scaffold for the course assistant
 
 ## Start the local stack
 
-The defaults work without a `.env` file. Copy `.env.example` to `.env` only when you want to override them. From the repository root run:
+The defaults work offline without a `.env` file. Copy `.env.example` to `.env` to opt into Gemini by setting `RAG_PROVIDER=gemini` and `GEMINI_API_KEY` (the key stays in the server environment). From the repository root run:
 
 ```sh
 docker compose up --build
@@ -35,7 +35,30 @@ docker compose up --build -d database api
 uv run --project backend python -m app.ingest --course-id course-1 --pdf Cours1.pdf
 ```
 
-The default embedding provider is deterministic for offline development. Use `--provider gemini` only when `GEMINI_API_KEY` is configured. The command accepts one relative PDF name/path, verifies that it resolves beneath `PDF_SOURCE_DIR`, and prints the document ID, checksum, page count, and persisted chunk count. It warns about pages with no extractable text; a PDF with no usable text fails without inserting records. This first ingestion path does not implement unchanged-file reruns or changed-file synchronization; those are handled in a later story.
+Ingestion uses `RAG_PROVIDER` by default; `--provider deterministic` or `--provider gemini` can explicitly override it for the one selected PDF. Gemini requires `GEMINI_API_KEY`. Documents record which embedding provider created their vectors. API startup refuses retrieval if any document is unverified or belongs to another provider. Re-ingesting the same unchanged PDF with the configured provider safely replaces only its embeddings and provider marker in one transaction; failed embedding or persistence leaves the old vectors intact. A matching provider is a no-op.
+
+The startup guard checks every document, so switching providers requires re-embedding every row whose marker differs from the selected provider (including legacy rows marked `NULL`). Before starting the API, configure `RAG_PROVIDER=gemini` and `GEMINI_API_KEY` in `.env`, start only PostgreSQL, apply migrations, and list all affected documents:
+
+```sh
+docker compose up -d database
+uv run --project backend python -m alembic -c backend/alembic.ini upgrade head
+docker compose exec database psql -U course_rag -d course_rag -c \
+  "SELECT course_id, source_filename, embedding_provider FROM documents WHERE embedding_provider IS DISTINCT FROM 'gemini' ORDER BY course_id, source_filename;"
+```
+
+For **each returned row**, make sure that exact unchanged PDF is present beneath `PDF_SOURCE_DIR`, then run the one-file command using its course ID and source filename (for example, for `course-1` and `Cours1.pdf`):
+
+```sh
+uv run --project backend python -m app.ingest --course-id course-1 --pdf Cours1.pdf
+```
+
+Repeat until the query returns no rows, then start the API and web app:
+
+```sh
+docker compose up --build -d api web
+```
+
+Do not delete or replace source files or database rows as a shortcut. If an affected PDF is missing or its bytes have changed, restore the original unchanged source before re-embedding; changed-source synchronization is outside this workflow. If the backend command is run outside the container, make sure `DATABASE_HOST=localhost` is set. After startup, use the chat with a natural-language question about the re-embedded course. Deterministic mode remains the default and does not make external calls.
 
 To inspect the saved page provenance and course ownership, query the local database:
 

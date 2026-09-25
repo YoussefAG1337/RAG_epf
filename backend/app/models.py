@@ -33,6 +33,10 @@ class Document(Base):
         CheckConstraint("length(source_filename) > 0", name="ck_documents_filename_nonempty"),
         CheckConstraint("checksum ~ '^[0-9a-fA-F]{64}$'", name="ck_documents_checksum_sha256_hex"),
         CheckConstraint("page_count > 0", name="ck_documents_page_count_positive"),
+        CheckConstraint(
+            "embedding_provider IS NULL OR length(embedding_provider) > 0",
+            name="ck_documents_embedding_provider_nonempty",
+        ),
         UniqueConstraint("id", "course_id", name="uq_documents_id_course"),
         UniqueConstraint(
             "course_id", "source_filename", "checksum", name="uq_documents_course_source_checksum"
@@ -45,6 +49,7 @@ class Document(Base):
     source_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     page_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

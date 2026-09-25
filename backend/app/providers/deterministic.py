@@ -11,6 +11,10 @@ class DeterministicEmbeddingProvider:
 
     dimensions: int = 768
 
+    @property
+    def provider_id(self) -> str:
+        return "deterministic"
+
     async def embed(self, text: str) -> list[float]:
         if not text.strip():
             raise ValueError("embedding input must not be empty")

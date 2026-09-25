@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from pgvector.sqlalchemy import Vector
+from pydantic import SecretStr
 from sqlalchemy import CheckConstraint, UniqueConstraint
 
 from app.config import Settings
@@ -15,7 +16,7 @@ from app.schema_guard import EmbeddingSchemaMismatchError, validate_embedding_sc
 
 
 class FakeResult:
-    def __init__(self, row: dict[str, Any] | None = None, scalar: str | None = None) -> None:
+    def __init__(self, row: dict[str, Any] | None = None, scalar: Any = None) -> None:
         self._row = row
         self._scalar = scalar
 
@@ -28,14 +29,23 @@ class FakeResult:
     def scalar_one_or_none(self) -> str | None:
         return self._scalar
 
+    def scalar_one(self) -> int:
+        return self._scalar
+
 
 class FakeConnection:
-    def __init__(self, model: str | None, dimensions: int | None, vector_type: str | None) -> None:
+    def __init__(
+        self, model: str | None, dimensions: int | None, vector_type: str | None,
+        provider_mismatches: int = 0,
+    ) -> None:
         self.model = model
         self.dimensions = dimensions
         self.vector_type = vector_type
+        self.provider_mismatches = provider_mismatches
 
-    def execute(self, statement: Any) -> FakeResult:
+    def execute(self, statement: Any, _parameters: Any = None) -> FakeResult:
+        if "embedding_provider" in str(statement):
+            return FakeResult(scalar=self.provider_mismatches)
         if "embedding_schema_metadata" in str(statement):
             if self.model is None or self.dimensions is None:
                 return FakeResult()
@@ -83,6 +93,14 @@ def test_startup_guard_accepts_matching_model_metadata_and_vector_column() -> No
     )
 
 
+def test_startup_guard_rejects_unverified_or_mismatched_document_vectors() -> None:
+    with pytest.raises(EmbeddingSchemaMismatchError, match="re-embed each unchanged PDF"):
+        validate_embedding_schema(
+            FakeConnection("gemini-embedding-2", 768, "vector(768)", provider_mismatches=1),  # type: ignore[arg-type]
+            Settings(rag_provider="gemini", gemini_api_key=SecretStr("test-secret")),
+        )
+
+
 @pytest.mark.parametrize(
     ("model", "dimensions", "vector_type", "message"),
     [
@@ -122,3 +140,4 @@ def test_alembic_offline_migration_contains_required_schema_ddl() -> None:
     assert "ix_chunks_embedding_hnsw" in migration_sql
     assert "uq_chunks_document_position" in migration_sql
     assert "gemini-embedding-2" in migration_sql
+    assert "embedding_provider" in migration_sql

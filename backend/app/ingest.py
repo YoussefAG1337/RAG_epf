@@ -7,6 +7,8 @@ import asyncio
 import sys
 from collections.abc import Sequence
 
+from pydantic import ValidationError
+
 from app.config import get_settings
 from app.db import create_database_engine, create_session_factory
 from app.ingestion import IngestionError, ingest_pdf
@@ -26,18 +28,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         choices=("deterministic", "gemini"),
-        default="deterministic",
-        help="embedding provider (default: deterministic; Gemini requires GEMINI_API_KEY)",
+        default=None,
+        help="override configured RAG_PROVIDER for this PDF (Gemini requires GEMINI_API_KEY)",
     )
     return parser
 
 
 async def _ingest(args: argparse.Namespace) -> int:
     settings = get_settings()
+    selected_provider = args.provider or settings.rag_provider
+    if selected_provider == "gemini" and (
+        settings.gemini_api_key is None or not settings.gemini_api_key.get_secret_value()
+    ):
+        raise IngestionError("GEMINI_API_KEY is required when selecting the Gemini provider")
     engine = create_database_engine(settings)
     provider = (
         DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
-        if args.provider == "deterministic"
+        if selected_provider == "deterministic"
         else GeminiEmbeddingProvider(
             settings.gemini_api_key,
             model=settings.embedding_model,
@@ -75,6 +82,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_ingest(args))
     except IngestionError as error:
         print(f"ingestion failed: {error}", file=sys.stderr)
+        return 1
+    except ValidationError:
+        print(
+            "ingestion failed: invalid runtime configuration; check RAG_PROVIDER "
+            "and GEMINI_API_KEY",
+            file=sys.stderr,
+        )
         return 1
     except Exception:
         print(

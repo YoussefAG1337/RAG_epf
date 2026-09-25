@@ -28,6 +28,9 @@ _VECTOR_TYPE_SQL = text(
       AND NOT attribute.attisdropped
     """
 )
+_PROVIDER_MISMATCH_SQL = text(
+    "SELECT count(*) FROM documents WHERE embedding_provider IS DISTINCT FROM :provider"
+)
 
 
 def validate_embedding_schema(connection: Connection, settings: Settings) -> None:
@@ -56,4 +59,13 @@ def validate_embedding_schema(connection: Connection, settings: Settings) -> Non
         raise EmbeddingSchemaMismatchError(
             "document_chunks.embedding column does not match migrated metadata "
             f"(expected {expected_vector_type}, found {vector_type or 'missing'})"
+        )
+    provider_mismatch_count = connection.execute(
+        _PROVIDER_MISMATCH_SQL, {"provider": settings.rag_provider}
+    ).scalar_one()
+    if provider_mismatch_count:
+        raise EmbeddingSchemaMismatchError(
+            f"{provider_mismatch_count} document(s) have unknown or incompatible embedding "
+            f"providers; re-embed each unchanged PDF with RAG_PROVIDER={settings.rag_provider} "
+            "before starting retrieval"
         )

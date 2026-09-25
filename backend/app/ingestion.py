@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -220,6 +221,26 @@ async def ingest_pdf(
         raise IngestionError(f"could not read selected PDF: {source_filename}") from error
 
     checksum = hashlib.sha256(pdf_bytes).hexdigest()
+    document_id = uuid5(
+        NAMESPACE_URL,
+        f"course={normalized_course_id}\nsource={source_filename}\nsha256={checksum}",
+    )
+    provider_id = getattr(embedding_provider, "provider_id", type(embedding_provider).__name__)
+    with session_factory() as session:
+        existing = session.get(Document, document_id)
+        if existing is not None and existing.embedding_provider == provider_id:
+            return IngestionResult(
+                document_id=document_id,
+                source_filename=source_filename,
+                checksum=checksum,
+                page_count=existing.page_count,
+                chunk_count=session.scalar(
+                    select(func.count())
+                    .select_from(DocumentChunk)
+                    .where(DocumentChunk.document_id == document_id)
+                ) or 0,
+                empty_pages=(),
+            )
     page_count, pages, empty_pages = _read_pdf(pdf_bytes, source_filename)
     drafts: list[_ChunkDraft] = []
     for physical_page_number, text in pages:
@@ -249,16 +270,13 @@ async def ingest_pdf(
             raise IngestionError("embedding provider returned a non-finite vector value")
         vectors.append(vector)
 
-    document_id = uuid5(
-        NAMESPACE_URL,
-        f"course={normalized_course_id}\nsource={source_filename}\nsha256={checksum}",
-    )
     document = Document(
         id=document_id,
         course_id=normalized_course_id,
         source_filename=source_filename,
         checksum=checksum,
         page_count=page_count,
+        embedding_provider=provider_id,
     )
     chunks = [
         DocumentChunk(
@@ -279,12 +297,37 @@ async def ingest_pdf(
 
     try:
         with session_factory.begin() as session:
-            session.add(document)
-            session.add_all(chunks)
+            current = session.scalar(
+                select(Document).where(Document.id == document_id).with_for_update()
+            )
+            if current is None:
+                session.add(document)
+                session.add_all(chunks)
+            elif current.embedding_provider != provider_id:
+                persisted_chunks = session.scalars(
+                    select(DocumentChunk)
+                    .where(DocumentChunk.document_id == document_id)
+                    .order_by(DocumentChunk.chunk_position)
+                    .with_for_update()
+                ).all()
+                if len(persisted_chunks) != len(chunks):
+                    raise IngestionError(
+                        "stored document chunks do not match the source; refusing provider update"
+                    )
+                for persisted, replacement in zip(persisted_chunks, chunks, strict=True):
+                    if (
+                        persisted.id != replacement.id
+                        or persisted.chunk_position != replacement.chunk_position
+                    ):
+                        raise IngestionError(
+                            "stored document chunks do not match the source; "
+                            "refusing provider update"
+                        )
+                    persisted.embedding = replacement.embedding
+                current.embedding_provider = provider_id
     except IntegrityError as error:
         raise IngestionError(
-            "database rejected this document; it may already exist for this course. "
-            "Unchanged-file rerun handling is provided by Story 7.1."
+            "database rejected this document; the transaction was rolled back"
         ) from error
     except SQLAlchemyError as error:
         raise IngestionError(

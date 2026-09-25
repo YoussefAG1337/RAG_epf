@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import SettingsConfigDict
 from pytest import MonkeyPatch
@@ -61,3 +62,13 @@ def test_runtime_retrieval_settings_are_semantically_validated() -> None:
         IsolatedSettings(retrieval_limit=0)
     with pytest.raises(ValidationError, match="evidence_minimum_score"):
         IsolatedSettings(evidence_minimum_score=1.1)
+
+
+def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("RAG_PROVIDER", raising=False)
+    with pytest.raises(ValidationError, match="GEMINI_API_KEY"):
+        IsolatedSettings(rag_provider="gemini")
+    assert IsolatedSettings(rag_provider="deterministic").rag_provider == "deterministic"
