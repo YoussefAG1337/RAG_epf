@@ -1,4 +1,6 @@
-# Evaluation Contract
+# Planned Evaluation Contract
+
+> **Implementation status:** This document describes a proposed evaluation dataset and runner. Neither is currently wired into the application, so these items are not current capabilities or verified acceptance criteria.
 
 ## Dataset shape
 

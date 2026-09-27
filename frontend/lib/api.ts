@@ -3,6 +3,10 @@ export type Readiness = {
   service: "course-rag-api";
 };
 
+export type Course = { course_id: string; source_filenames: string[] };
+export type CourseUpload = { course_id: string; source_filename: string; page_count: number; chunk_count: number };
+export type ConversationTurn = { role: "user" | "assistant"; content: string };
+
 export type Citation = { citation_id: string; source_filename: string; physical_page_number: number; excerpt: string };
 export type AnswerStreamEvent =
   | { version: 1; type: "delta"; text: string }
@@ -12,6 +16,68 @@ export type AnswerStreamEvent =
   | { version: 1; type: "error"; message: string };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+export async function fetchCourses(fetcher: typeof fetch = fetch): Promise<Course[]> {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/courses`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Course list request failed with status ${response.status}`);
+  const body: unknown = await response.json();
+  if (typeof body !== "object" || body === null || !("courses" in body) || !Array.isArray(body.courses)) {
+    throw new Error("Course list response has an invalid shape");
+  }
+  return body.courses.map((value): Course => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error("Course list response has an invalid shape");
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.course_id !== "string" || !record.course_id.length ||
+        !Array.isArray(record.source_filenames) ||
+        !record.source_filenames.every((filename) => typeof filename === "string" && filename.length > 0)) {
+      throw new Error("Course list response has an invalid shape");
+    }
+    return { course_id: record.course_id, source_filenames: record.source_filenames as string[] };
+  });
+}
+
+export async function uploadCoursePdf(
+  courseId: string,
+  file: File,
+  fetcher: typeof fetch = fetch,
+): Promise<CourseUpload> {
+  const query = new URLSearchParams({ course_id: courseId, filename: file.name });
+  const response = await fetcher(`${apiBaseUrl}/api/v1/courses?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/pdf" },
+    body: file,
+    cache: "no-store",
+  });
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error(`Course upload failed with status ${response.status}`);
+  }
+  if (!response.ok) {
+    const detail = typeof body === "object" && body !== null && "detail" in body && typeof body.detail === "string"
+      ? body.detail
+      : `Course upload failed with status ${response.status}`;
+    throw new Error(detail);
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new Error("Course upload response has an invalid shape");
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record.course_id !== "string" || typeof record.source_filename !== "string" ||
+      typeof record.page_count !== "number" || !Number.isInteger(record.page_count) ||
+      typeof record.chunk_count !== "number" || !Number.isInteger(record.chunk_count)) {
+    throw new Error("Course upload response has an invalid shape");
+  }
+  return {
+    course_id: record.course_id,
+    source_filename: record.source_filename,
+    page_count: record.page_count,
+    chunk_count: record.chunk_count,
+  };
+}
 
 export async function consumeAnswerStream(
   response: Response,
@@ -86,10 +152,19 @@ export async function consumeAnswerStream(
   }
 }
 
-export async function requestAnswerStream(courseId: string, question: string, onEvent: (event: AnswerStreamEvent) => void, fetcher: typeof fetch = fetch): Promise<void> {
+export async function requestAnswerStream(
+  courseId: string,
+  question: string,
+  onEvent: (event: AnswerStreamEvent) => void,
+  fetcher: typeof fetch = fetch,
+  history: ConversationTurn[] = [],
+): Promise<void> {
+  const body = history.length
+    ? JSON.stringify({ course_id: courseId, question, history })
+    : JSON.stringify({ course_id: courseId, question });
   const response = await fetcher(`${apiBaseUrl}/api/v1/answers/stream`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ course_id: courseId, question }), cache: "no-store",
+    body, cache: "no-store",
   });
   await consumeAnswerStream(response, onEvent);
 }

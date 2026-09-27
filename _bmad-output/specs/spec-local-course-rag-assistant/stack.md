@@ -1,65 +1,59 @@
-# Implementation Contract
+# Current Implementation Notes
+
+This file records the architecture and behavior visible in the current source. It is descriptive; aspirational requirements belong in a future-state plan.
 
 ## Components
 
-| Area | Required choice | Responsibility |
-|---|---|---|
-| Backend | Python and FastAPI | HTTP API, retrieval orchestration, streaming, ingestion command integration, and evaluation command integration |
-| Frontend | Next.js | Single-course student chat, streamed response rendering, abstention states, and citation cards |
-| Database | PostgreSQL with pgvector via Docker Compose | Documents, chunks, vector similarity search, ingestion state, and schema migrations |
-| Model provider | Gemini API | `gemini-embedding-2` embeddings at 768 dimensions and `gemini-3.8-flash` grounded answer generation |
-| PDF extraction | `pypdf` | Text extraction with physical PDF page provenance |
-| Persistence | SQLAlchemy and Alembic | Data access, transactions, vector queries, and migrations |
-| Validation | Pydantic | Configuration, command inputs, API requests, streamed events, citations, and evaluation records |
+- **Web:** Next.js course upload, course selection, chat transcript, streamed event rendering, and citation display.
+- **API:** FastAPI readiness, course listing, PDF upload/ingestion, and NDJSON answer streaming.
+- **Database:** PostgreSQL with pgvector, SQLAlchemy, and Alembic migrations.
+- **PDF processing:** `pypdf` text extraction and deterministic per-page chunking with overlap.
+- **Providers:** Deterministic embedding/generation for offline use; Gemini embeddings and generation; OpenAI and Groq answer generation. Provider choice and API keys are configured on the server.
+- **Validation:** Pydantic models validate runtime settings, API inputs, provider output, and stream events.
 
-Direct integrations are required. LangChain and LlamaIndex must not be introduced.
+## Persisted records
 
-## Data invariants
-
-- A document record contains at least: stable identifier, `course_id`, source filename, checksum, page count, and ingestion timestamps.
-- A chunk record contains at least: stable identifier, document identifier, `course_id`, one-based physical PDF page number, extracted text, 768-dimensional embedding, and deterministic position within the document.
-- The document checksum is derived from source file bytes. An unchanged `(course_id, source identity, checksum)` is a no-op on re-ingestion.
-- Replacing a changed source must atomically replace or reconcile its derived chunks so stale and current versions are never retrieved together.
-- Database constraints and indexes enforce course scoping, document/chunk relationships, idempotency keys, and vector retrieval needs.
-- Retrieved evidence retains chunk, document, filename, page, and excerpt provenance through generation and serialization.
-- The embedding column schema matches the configured 768 dimensions. The embedding model identifier and dimensionality are coupled schema metadata; changing either requires an Alembic migration appropriate to the new vector schema and complete re-embedding of all chunks before retrieval resumes.
+- A document stores a UUID, course ID, source filename, SHA-256 checksum, page count, embedding provider, and creation time.
+- A chunk stores a UUID, document and course IDs, one-based physical page number, deterministic position, extracted text, and a 768-dimensional vector.
+- A schema metadata row records the configured embedding model and dimensions.
+- Course names are represented by `Document.course_id`; there is no standalone course table or additional course metadata.
+- Conversation messages are not persisted in the database.
 
 ## Ingestion behavior
 
-- A local command accepts the course identifier and PDF source directory through validated arguments or configuration.
-- It rejects unreadable, encrypted, non-PDF, scanned, or text-empty inputs with a per-file diagnostic; one bad file must not silently corrupt the collection.
-- Chunk identifiers and ordering are deterministic for unchanged extracted content.
-- Embeddings are created only for new or changed chunks.
-- A run reports inserted, updated, unchanged, skipped, and failed files and exits nonzero when ingestion cannot establish a consistent searchable collection.
+- The web upload accepts one PDF and a new unique course name. The request body is capped at 25 MiB. The upload is stored beneath `PDF_SOURCE_DIR/.uploads/` and ingested during the same API request.
+- A course with an existing document is rejected by the web upload endpoint. The UI therefore supports one uploaded PDF per course.
+- The CLI ingests one PDF selected beneath the configured source directory for a supplied course ID.
+- Ingestion rejects invalid, encrypted, empty, or non-searchable PDFs. It extracts text per physical page and does not perform OCR.
+- Checksums and deterministic document/chunk identifiers make an unchanged source a no-op when its embedding provider matches.
+- If the provider differs, the current code re-embeds the source and updates vectors transactionally when persisted chunks match. General changed-source reconciliation and stale document cleanup are not implemented.
 
-## Question-answer flow
+## Answer flow
 
-1. Validate the question and `course_id`.
-2. Embed the question with `gemini-embedding-2` at 768 output dimensions.
-3. Retrieve and rank only chunks matching `course_id`.
-4. Decide whether the evidence is sufficient; ambiguous questions may require an abstention or clarification request rather than a guessed interpretation.
-5. Send only the question, strict grounding instructions, and selected excerpts with stable citation identifiers to `gemini-3.8-flash` by default.
-6. Stream typed events for answer deltas, final citations, completion, and errors.
-7. Validate that final citation identifiers resolve to retrieved evidence before exposing a supported answer. If grounding validation fails, return an abstention instead.
+1. Validate the selected course ID, question, and bounded history turns.
+2. Embed the question, incorporating recent history to resolve follow-up references.
+3. Filter chunks to the selected course in SQL, rank by cosine distance, limit results, and discard results below the configured score threshold.
+4. Ask the selected generation provider for JSON claims grounded in retrieved excerpts. Conversation history is labeled as untrusted contextual information.
+5. Validate response structure and ensure every citation ID resolves to retrieved evidence. This validates citation membership, not semantic support of each claim.
+6. Emit claim text as bounded NDJSON delta events, followed by citation metadata and completion. Text is emitted after generation completes; this is not live token streaming.
+7. Convert failures, including insufficient evidence, to a generic safe error event. Dedicated abstention and clarification event variants are not implemented in the active answer flow.
 
-## API and UI contract
+## API and browser behavior
 
-- The backend exposes a versioned chat endpoint with a transport suitable for one-way answer streaming from a single request.
-- The stream distinguishes text deltas, final citation metadata, completion, abstention, and error states.
-- A citation contains a stable citation identifier, source filename, one-based physical PDF page number, and supporting excerpt.
-- Printed page labels are neither extracted nor displayed in V1.
-- The UI prevents accidental duplicate submissions, indicates streaming progress, preserves the current in-memory conversation, and renders failures without fabricating a partial completion.
-- Conversation persistence across browser reloads is not required unless added by a later spec update.
+- `GET /api/v1/readiness` reports API readiness.
+- `GET /api/v1/courses` lists courses derived from stored documents and their source filenames.
+- `POST /api/v1/courses?course_id=...&filename=...` accepts the raw PDF body and creates a course from one searchable PDF.
+- `POST /api/v1/answers/stream` accepts `course_id`, `question`, and up to 12 `{role, content}` history turns. It returns newline-delimited JSON.
+- The browser retains chat history for the current page session. New chat, course change, and reload clear it. Only the selected course's retrieved excerpts are factual grounding input for each response.
 
-## Configuration and secrets
+## Runtime configuration
 
-- Runtime configuration is validated at startup and includes the database URL, Gemini API key, answer model defaulting to `gemini-3.8-flash`, embedding model fixed to `gemini-embedding-2`, embedding dimensions fixed to 768, retrieval limits, and evidence sufficiency settings.
-- Startup must reject embedding configuration that does not match the migrated database schema and stored embedding metadata.
-- Secrets are supplied through local environment configuration and are never committed or returned to the browser.
-- One Docker Compose definition runs PostgreSQL with pgvector for local development; application processes may run locally outside containers.
+- Local defaults use deterministic providers. `RAG_PROVIDER` selects the embedding provider; `ANSWER_PROVIDER` can independently select deterministic, Gemini, OpenAI, or Groq answer generation. When unset, answer provider follows `RAG_PROVIDER`.
+- Embedding model/dimensions are fixed to `gemini-embedding-2` and 768 by configuration and database schema checks.
+- Retrieval count and minimum cosine similarity score are configurable.
+- Database connection, PDF source directory, frontend origin, provider credentials, and provider models are server-side settings.
+- Docker Compose is the documented local topology: database, API, and web.
 
-## Verification boundaries
+## Known verification boundary
 
-- Unit tests cover checksum/idempotency logic, chunk provenance, course filtering, citation resolution, sufficiency decisions, and stream serialization.
-- Integration tests cover migrations, pgvector retrieval, changed-file re-ingestion, API streaming, and the Gemini boundary using controlled test doubles.
-- No test may require live Gemini access by default; an opt-in smoke test may verify provider compatibility.
+Unit and frontend tests are present in the repository, but this companion does not claim that they pass. No integration evaluation runner or evaluation dataset is currently wired into the application. The intended evaluation categories and manual review approach are described separately in `evaluation.md` and should be treated as planned until implemented.

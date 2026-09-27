@@ -18,6 +18,8 @@ class IsolatedSettings(Settings):
 def test_settings_have_offline_defaults(monkeypatch: MonkeyPatch) -> None:
     # The developer's environment may contain a provider key; defaults must remain testable offline.
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     settings = IsolatedSettings()
 
     assert settings.answer_model == "gemini-3.8-flash"
@@ -25,6 +27,9 @@ def test_settings_have_offline_defaults(monkeypatch: MonkeyPatch) -> None:
     assert settings.embedding_dimensions == 768
     assert settings.pdf_source_dir == Path("data/course-pdfs")
     assert settings.gemini_api_key is None
+    assert settings.openai_api_key is None
+    assert settings.groq_api_key is None
+    assert settings.selected_answer_provider == "deterministic"
 
 
 def test_settings_do_not_serialize_provider_secret() -> None:
@@ -72,3 +77,32 @@ def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(
     with pytest.raises(ValidationError, match="GEMINI_API_KEY"):
         IsolatedSettings(rag_provider="gemini")
     assert IsolatedSettings(rag_provider="deterministic").rag_provider == "deterministic"
+
+
+def test_openai_answer_mode_requires_key_and_keeps_embedding_provider_independent() -> None:
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
+        IsolatedSettings(answer_provider="openai")
+
+    settings = IsolatedSettings(
+        rag_provider="deterministic",
+        answer_provider="openai",
+        openai_api_key=SecretStr("test-only"),
+    )
+    assert settings.rag_provider == "deterministic"
+    assert settings.selected_answer_provider == "openai"
+    assert "test-only" not in settings.model_dump_json()
+
+
+def test_groq_answer_mode_requires_key_and_keeps_embedding_provider_independent() -> None:
+    with pytest.raises(ValidationError, match="GROQ_API_KEY"):
+        IsolatedSettings(answer_provider="groq")
+
+    settings = IsolatedSettings(
+        rag_provider="gemini",
+        gemini_api_key=SecretStr("gemini-test-only"),
+        answer_provider="groq",
+        groq_api_key=SecretStr("groq-test-only"),
+    )
+    assert settings.rag_provider == "gemini"
+    assert settings.selected_answer_provider == "groq"
+    assert "groq-test-only" not in settings.model_dump_json()

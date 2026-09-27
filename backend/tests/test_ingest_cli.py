@@ -130,7 +130,7 @@ def test_cli_fails_clearly_before_ingestion_when_gemini_key_is_missing(
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     def missing_key_settings():
-        return Settings(rag_provider="gemini")
+        return Settings(_env_file=None, rag_provider="gemini")
 
     monkeypatch.setattr(ingest, "get_settings", missing_key_settings)
     monkeypatch.setattr(

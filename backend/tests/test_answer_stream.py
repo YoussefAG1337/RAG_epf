@@ -7,11 +7,15 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy import create_engine
 
 from app.answering import AnswerCitation, AnswerClaim, GroundedAnswer
 from app.config import Settings
 from app.main import create_app
+from app.providers.deterministic import DeterministicEmbeddingProvider
 from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
+from app.providers.groq import GroqGenerationProvider
+from app.providers.openai import OpenAIGenerationProvider
 
 
 def test_stream_emits_deltas_citations_then_one_completion(monkeypatch) -> None:
@@ -106,7 +110,11 @@ def test_gemini_runtime_selects_matching_embedding_and_generation_adapters(monke
         return GroundedAnswer(claims=[], citations=[])
 
     monkeypatch.setattr("app.main.answer_question", answer_question)
-    settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
+    settings = Settings(
+        rag_provider="gemini",
+        answer_provider=None,
+        gemini_api_key=SecretStr("server-test-key"),
+    )
     with TestClient(create_app(schema_guard=None, settings_factory=lambda: settings)) as client:
         response = client.post(
             "/api/v1/answers/stream", json={"course_id": "course-a", "question": "Question?"}
@@ -115,6 +123,53 @@ def test_gemini_runtime_selects_matching_embedding_and_generation_adapters(monke
     assert response.status_code == 200
     assert isinstance(captured["embedding_provider"], GeminiEmbeddingProvider)
     assert isinstance(captured["generation_provider"], GeminiGenerationProvider)
+
+
+def test_openai_answer_provider_does_not_change_embedding_provider(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def answer_question(**kwargs: object) -> GroundedAnswer:
+        captured.update(kwargs)
+        return GroundedAnswer(claims=[], citations=[])
+
+    monkeypatch.setattr("app.main.answer_question", answer_question)
+    settings = Settings(
+        rag_provider="deterministic",
+        answer_provider="openai",
+        openai_api_key=SecretStr("server-test-key"),
+    )
+    with TestClient(create_app(schema_guard=None, settings_factory=lambda: settings)) as client:
+        response = client.post(
+            "/api/v1/answers/stream", json={"course_id": "course-a", "question": "Question?"}
+        )
+
+    assert response.status_code == 200
+    assert isinstance(captured["embedding_provider"], DeterministicEmbeddingProvider)
+    assert isinstance(captured["generation_provider"], OpenAIGenerationProvider)
+
+
+def test_groq_answer_provider_does_not_change_gemini_embedding_provider(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def answer_question(**kwargs: object) -> GroundedAnswer:
+        captured.update(kwargs)
+        return GroundedAnswer(claims=[], citations=[])
+
+    monkeypatch.setattr("app.main.answer_question", answer_question)
+    settings = Settings(
+        rag_provider="gemini",
+        gemini_api_key=SecretStr("gemini-test-key"),
+        answer_provider="groq",
+        groq_api_key=SecretStr("groq-test-key"),
+    )
+    with TestClient(create_app(schema_guard=None, settings_factory=lambda: settings)) as client:
+        response = client.post(
+            "/api/v1/answers/stream", json={"course_id": "course-a", "question": "Question?"}
+        )
+
+    assert response.status_code == 200
+    assert isinstance(captured["embedding_provider"], GeminiEmbeddingProvider)
+    assert isinstance(captured["generation_provider"], GroqGenerationProvider)
 
 
 def test_gemini_adapters_run_real_answer_flow_and_stream_same_course_citation() -> None:
@@ -170,7 +225,11 @@ def test_gemini_adapters_run_real_answer_flow_and_stream_same_course_citation() 
             return FakeSession()
 
     sdk_client = FakeSDKClient()
-    settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
+    settings = Settings(
+        rag_provider="gemini",
+        answer_provider=None,
+        gemini_api_key=SecretStr("server-test-key"),
+    )
     app = create_app(
         schema_guard=None,
         session_factory=FakeSessionFactory(),  # type: ignore[arg-type]
@@ -223,10 +282,49 @@ def test_gemini_providers_close_when_schema_validation_fails(monkeypatch) -> Non
     def fail_schema(_connection, _settings) -> None:
         raise RuntimeError("schema mismatch")
 
-    settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
-    app = create_app(schema_guard=fail_schema, settings_factory=lambda: settings)
+    settings = Settings(
+        rag_provider="gemini",
+        answer_provider=None,
+        gemini_api_key=SecretStr("server-test-key"),
+    )
+    app = create_app(
+        schema_guard=fail_schema,
+        engine_factory=lambda _settings: create_engine("sqlite://"),
+        settings_factory=lambda: settings,
+    )
 
     with pytest.raises(RuntimeError, match="schema mismatch"), TestClient(app):
         pass
 
     assert closed == ["embed", "generate"]
+
+
+def test_openai_provider_closes_when_schema_validation_fails(monkeypatch) -> None:
+    closed: list[str] = []
+
+    class ClosableProvider:
+        async def aclose(self) -> None:
+            closed.append("generate")
+
+    monkeypatch.setattr(
+        "app.main.OpenAIGenerationProvider", lambda *_args, **_kwargs: ClosableProvider()
+    )
+
+    def fail_schema(_connection, _settings) -> None:
+        raise RuntimeError("schema mismatch")
+
+    settings = Settings(
+        rag_provider="deterministic",
+        answer_provider="openai",
+        openai_api_key=SecretStr("server-test-key"),
+    )
+    app = create_app(
+        schema_guard=fail_schema,
+        engine_factory=lambda _settings: create_engine("sqlite://"),
+        settings_factory=lambda: settings,
+    )
+
+    with pytest.raises(RuntimeError, match="schema mismatch"), TestClient(app):
+        pass
+
+    assert closed == ["generate"]

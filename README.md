@@ -16,13 +16,21 @@ The defaults work offline without a `.env` file. Copy `.env.example` to `.env` t
 docker compose up --build
 ```
 
+To use OpenAI for answer generation while keeping the current embedding provider, set `ANSWER_PROVIDER=openai` and `OPENAI_API_KEY` in `.env`. `OPENAI_ANSWER_MODEL` selects the OpenAI model (default `gpt-4.1-mini`). `RAG_PROVIDER` continues to select embeddings; leaving it as `deterministic` avoids provider changes to existing vectors. The OpenAI key is only passed to the API container.
+
+To use Groq instead, set `ANSWER_PROVIDER=groq` and `GROQ_API_KEY` in `.env`. `GROQ_ANSWER_MODEL` selects the Groq model (default `openai/gpt-oss-20b`). Groq uses its OpenAI-compatible chat completions API; `RAG_PROVIDER` continues to control embeddings. Check Groq's current model and free-tier limits in its console documentation before choosing a model.
+
 Open the web app at <http://localhost:3000>. The readiness panel reports whether the API at <http://localhost:8000/api/v1/readiness> is reachable. PostgreSQL listens on port 5432. The checked-in defaults are for local development only; replace them before using this stack outside your machine. The API container applies Alembic migrations before starting, and its startup check verifies that the database vector schema matches the configured Gemini embedding model and dimensions. Gemini is not called at startup or by readiness, and no API key is needed until a live provider is invoked.
 
 ## Ask a course question
 
-After ingesting a PDF, use its course ID in the chat at <http://localhost:3000>, enter a question, and select **Ask**. The default local API uses deterministic embedding and generation providers, so the browser demo and automated checks do not require Gemini credentials. A live provider is configured only on the server.
+Add a unique course name and searchable PDF in the web app at <http://localhost:3000>. Each upload creates one course; the API validates and ingests the PDF, then selects the course so you can ask a question right away. PDFs must be text-searchable and no larger than 25 MB. Existing courses appear in the selector with their PDF filenames. Uploaded PDFs are stored beneath `PDF_SOURCE_DIR`; use the local ingestion command below when you need CLI-based ingestion. The default local API uses deterministic embedding and generation providers, so local development does not require Gemini credentials.
+
+Chat messages remain in browser memory for the current page session. Follow-up questions include recent turns for context, while each answer retrieves evidence only from the selected course. Starting a new chat or reloading the page clears the conversation.
 
 The API accepts `POST /api/v1/answers/stream` with JSON `{ "course_id": "course-1", "question": "..." }` and returns newline-delimited JSON (`application/x-ndjson`). Each event has `version: 1` and a `type`: supported answers emit one or more `delta` events, then `citations` with filename, one-based physical page, and excerpt, then exactly one terminal `completed` event. Failures emit one safe terminal `error` event. `clarification` and `abstention` are reserved contract event types for later policy work.
+
+The optional `history` field contains up to 12 recent `{ "role": "user" | "assistant", "content": "..." }` turns to interpret follow-up questions. History is held in browser memory and is not persisted.
 
 ## Ingest one PDF
 

@@ -5,6 +5,8 @@ from app.providers.deterministic import (
     DeterministicGenerationProvider,
 )
 from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
+from app.providers.groq import GroqGenerationProvider
+from app.providers.openai import OpenAIGenerationProvider
 from app.providers.protocols import (
     EmbeddingProvider,
     GenerationProvider,
@@ -18,5 +20,7 @@ __all__ = [
     "GeminiEmbeddingProvider",
     "GeminiGenerationProvider",
     "GenerationProvider",
+    "GroqGenerationProvider",
+    "OpenAIGenerationProvider",
     "ProviderConfigurationError",
 ]

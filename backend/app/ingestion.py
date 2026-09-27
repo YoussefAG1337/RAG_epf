@@ -210,11 +210,15 @@ async def ingest_pdf(
     course_id: str,
     session_factory: sessionmaker[Session],
     embedding_provider: EmbeddingProvider,
+    display_filename: str | None = None,
 ) -> IngestionResult:
     """Ingest one selected PDF and atomically persist its course-scoped vectors."""
 
     normalized_course_id = validate_course_id(course_id)
-    resolved_pdf, source_filename = resolve_selected_pdf(source_directory, selected_pdf)
+    resolved_pdf, stored_filename = resolve_selected_pdf(source_directory, selected_pdf)
+    source_filename = display_filename or stored_filename
+    if not source_filename.strip() or len(source_filename) > 512:
+        raise IngestionError("source filename must be between 1 and 512 characters")
     try:
         pdf_bytes = resolved_pdf.read_bytes()
     except OSError as error:

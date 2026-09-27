@@ -11,6 +11,8 @@ from app.providers.deterministic import (
     DeterministicGenerationProvider,
 )
 from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
+from app.providers.groq import GroqGenerationProvider
+from app.providers.openai import OpenAIGenerationProvider
 from app.providers.protocols import ProviderConfigurationError
 
 
@@ -112,6 +114,110 @@ def test_generation_rejects_empty_text_response() -> None:
     async def verify() -> None:
         provider = GeminiGenerationProvider(
             SecretStr("test-only"), client=EmptyClient()  # type: ignore[arg-type]
+        )
+        with pytest.raises(RuntimeError, match="no text response"):
+            await provider.generate("prompt")
+
+    asyncio.run(verify())
+
+
+def test_openai_generation_uses_json_mode_and_configured_model() -> None:
+    class FakeResponses:
+        def __init__(self) -> None:
+            self.call: dict[str, Any] | None = None
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.call = kwargs
+            return type("Response", (), {"output_text": '{"claims": []}'})()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.responses = FakeResponses()
+
+    async def verify() -> None:
+        client = FakeClient()
+        provider = OpenAIGenerationProvider(
+            SecretStr("test-only"), model="test-model", client=client  # type: ignore[arg-type]
+        )
+        result = await provider.generate("grounded prompt")
+
+        assert result == '{"claims": []}'
+        assert client.responses.call == {
+            "model": "test-model",
+            "input": "grounded prompt",
+            "text": {"format": {"type": "json_object"}},
+        }
+
+    asyncio.run(verify())
+
+
+def test_openai_generation_requires_key_and_rejects_empty_response() -> None:
+    class EmptyResponses:
+        async def create(self, **_kwargs: Any) -> Any:
+            return type("Response", (), {"output_text": "  "})()
+
+    class EmptyClient:
+        responses = EmptyResponses()
+
+    async def verify() -> None:
+        with pytest.raises(ProviderConfigurationError, match="OPENAI_API_KEY"):
+            await OpenAIGenerationProvider(None).generate("prompt")
+        provider = OpenAIGenerationProvider(
+            SecretStr("test-only"), client=EmptyClient()  # type: ignore[arg-type]
+        )
+        with pytest.raises(RuntimeError, match="no text response"):
+            await provider.generate("prompt")
+
+    asyncio.run(verify())
+
+
+def test_groq_generation_uses_chat_json_mode_and_configured_model() -> None:
+    class FakeCompletions:
+        def __init__(self) -> None:
+            self.call: dict[str, Any] | None = None
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.call = kwargs
+            message = type("Message", (), {"content": '{"claims": []}'})()
+            choice = type("Choice", (), {"message": message})()
+            return type("Response", (), {"choices": [choice]})()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    async def verify() -> None:
+        client = FakeClient()
+        provider = GroqGenerationProvider(
+            SecretStr("test-only"), model="test-model", client=client  # type: ignore[arg-type]
+        )
+        result = await provider.generate("grounded prompt")
+
+        assert result == '{"claims": []}'
+        assert client.chat.completions.call == {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "grounded prompt"}],
+            "response_format": {"type": "json_object"},
+        }
+
+    asyncio.run(verify())
+
+
+def test_groq_generation_requires_key_and_rejects_empty_response() -> None:
+    class FakeCompletions:
+        async def create(self, **_kwargs: Any) -> Any:
+            message = type("Message", (), {"content": None})()
+            choice = type("Choice", (), {"message": message})()
+            return type("Response", (), {"choices": [choice]})()
+
+    class FakeClient:
+        chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    async def verify() -> None:
+        with pytest.raises(ProviderConfigurationError, match="GROQ_API_KEY"):
+            await GroqGenerationProvider(None).generate("prompt")
+        provider = GroqGenerationProvider(
+            SecretStr("test-only"), client=FakeClient()  # type: ignore[arg-type]
         )
         with pytest.raises(RuntimeError, match="no text response"):
             await provider.generate("prompt")
