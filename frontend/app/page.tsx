@@ -163,7 +163,7 @@ export default function Home() {
       <section className="card" aria-labelledby="title">
         <p className="eyebrow">Local development</p>
         <h1 id="title">Course assistant</h1>
-        <p className="intro">Ask questions and follow up about a course's ingested material.</p>
+        <p className="intro">Ask questions and follow up about a course&apos;s ingested material.</p>
         <form className="chat-form" onSubmit={addCourse}>
           <h2>Add a course</h2>
           <p>Each searchable PDF creates one course. Course names must be unique. PDFs can be up to 25 MB.</p>
