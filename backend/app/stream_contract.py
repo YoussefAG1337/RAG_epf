@@ -18,6 +18,10 @@ class DeltaEvent(StreamEvent):
 
 class CitationItem(BaseModel):
     citation_id: str
+    subject: str
+    course_id: str
+    document_title: str | None
+    section_title: str | None
     source_filename: str
     physical_page_number: int
     excerpt: str

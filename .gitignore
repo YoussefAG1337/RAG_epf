@@ -18,8 +18,9 @@ node_modules/
 coverage/
 *.tsbuildinfo
 
-# Local course content
+# Local course content (teachers' material: never commit)
 data/
+cours/
 
 # Local editor and OS files
 .vscode/

@@ -30,6 +30,7 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         CheckConstraint("length(course_id) > 0", name="ck_documents_course_id_nonempty"),
+        CheckConstraint("length(subject) > 0", name="ck_documents_subject_nonempty"),
         CheckConstraint("length(source_filename) > 0", name="ck_documents_filename_nonempty"),
         CheckConstraint("checksum ~ '^[0-9a-fA-F]{64}$'", name="ck_documents_checksum_sha256_hex"),
         CheckConstraint("page_count > 0", name="ck_documents_page_count_positive"),
@@ -42,10 +43,14 @@ class Document(Base):
             "course_id", "source_filename", "checksum", name="uq_documents_course_source_checksum"
         ),
         Index("ix_documents_course_id", "course_id"),
+        Index("ix_documents_subject", "subject"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    subject: Mapped[str] = mapped_column(String(200), nullable=False)
     course_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Deck title from the first slide, or derived from the filename.
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     page_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -86,6 +91,8 @@ class DocumentChunk(Base):
     course_id: Mapped[str] = mapped_column(String(200), nullable=False)
     physical_page_number: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Heading path within the document, e.g. "Chapitre 2 : Les arbres > Parcours".
+    section_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(768), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

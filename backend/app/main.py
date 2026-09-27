@@ -1,7 +1,8 @@
 """FastAPI application and initial readiness contract."""
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+import logging
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Literal, cast
 
 from fastapi import FastAPI
@@ -11,7 +12,13 @@ from pydantic import BaseModel, ConfigDict, StrictStr
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.answering import answer_question
+from app.answering import (
+    CourseSummary,
+    NoEvidenceError,
+    UnsupportedQuestionError,
+    answer_question,
+    list_courses,
+)
 from app.config import Settings, get_settings
 from app.db import create_database_engine, create_session_factory
 from app.providers.deterministic import (
@@ -22,12 +29,15 @@ from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvid
 from app.providers.protocols import EmbeddingProvider, GenerationProvider
 from app.schema_guard import validate_embedding_schema
 from app.stream_contract import (
+    AbstentionEvent,
     CitationItem,
     CitationsEvent,
     CompletedEvent,
     DeltaEvent,
     ErrorEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReadinessResponse(BaseModel):
@@ -39,8 +49,23 @@ class ReadinessResponse(BaseModel):
 
 class StreamRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
+    # Omitted or null scopes search every course; a string must name one subject/course.
+    subject: StrictStr | None = None
     course_id: StrictStr | None = None
     question: StrictStr | None = None
+
+
+class CoursesResponse(BaseModel):
+    """Courses that currently have ingested material."""
+
+    courses: list[CourseSummary]
+
+
+_ERROR_MESSAGE = "The answer could not be generated. Check the course and question, then try again."
+_ABSTENTION_MESSAGE = (
+    "I couldn't find this in the course material. Try rephrasing the question "
+    "or choosing a different course."
+)
 
 
 def _delta_chunks(text: str, maximum_length: int = 80) -> list[str]:
@@ -84,7 +109,9 @@ def create_app(
                 configured_generation = (
                     generation_provider
                     or GeminiGenerationProvider(
-                        settings.gemini_api_key, model=settings.answer_model
+                        settings.gemini_api_key,
+                        model=settings.answer_model,
+                        fallback_models=settings.fallback_answer_models,
                     )
                 )
                 # Validate credentials at startup without making a provider request.
@@ -119,40 +146,48 @@ def create_app(
     application = FastAPI(title="Local Course RAG API", version="0.1.0", lifespan=lifespan)
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[get_settings().frontend_origin],
+        allow_origins=get_settings().frontend_origins,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
+
+    @contextmanager
+    def session_scope(settings: Settings) -> Iterator[sessionmaker[Session]]:
+        """Yield the injected session factory, or one backed by a request-owned engine."""
+
+        if session_factory is not None:
+            yield session_factory
+            return
+        owned_engine = engine_factory(settings)
+        try:
+            yield create_session_factory(owned_engine)
+        finally:
+            owned_engine.dispose()
 
     @application.get("/api/v1/readiness", response_model=ReadinessResponse, tags=["system"])
     def readiness() -> ReadinessResponse:
         return ReadinessResponse()
 
+    @application.get("/api/v1/courses", response_model=CoursesResponse, tags=["courses"])
+    def courses() -> CoursesResponse:
+        with session_scope(settings_factory()) as factory:
+            return CoursesResponse(courses=list_courses(factory))
+
     @application.post("/api/v1/answers/stream", tags=["answers"])
     async def stream_answer(request: StreamRequest) -> StreamingResponse:
         async def events() -> AsyncIterator[str]:
             terminal = False
-            owned_engine: Engine | None = None
             try:
                 settings = settings_factory()
                 if (
-                    not request.course_id
-                    or not request.course_id.strip()
+                    (request.course_id is not None and not request.course_id.strip())
+                    or (request.subject is not None and not request.subject.strip())
                     or not request.question
                     or not request.question.strip()
                 ):
-                    yield ErrorEvent(
-                        message=(
-                            "The answer could not be generated. Check the course and "
-                            "question, then try again."
-                        )
-                    ).model_dump_json() + "\n"
+                    yield ErrorEvent(message=_ERROR_MESSAGE).model_dump_json() + "\n"
                     terminal = True
                     return
-                factory = session_factory
-                if factory is None:
-                    owned_engine = engine_factory(settings)
-                    factory = create_session_factory(owned_engine)
                 selected_embedding_provider = cast(
                     EmbeddingProvider,
                     embedding_provider
@@ -165,14 +200,21 @@ def create_app(
                     or getattr(application.state, "generation_provider", None)
                     or DeterministicGenerationProvider(),
                 )
-                answer = await answer_question(
-                    question=request.question,
-                    course_id=request.course_id,
-                    session_factory=factory,
-                    embedding_provider=selected_embedding_provider,
-                    generation_provider=selected_generation_provider,
-                    settings=settings,
-                )
+                try:
+                    with session_scope(settings) as factory:
+                        answer = await answer_question(
+                            question=request.question,
+                            course_id=request.course_id,
+                            subject=request.subject,
+                            session_factory=factory,
+                            embedding_provider=selected_embedding_provider,
+                            generation_provider=selected_generation_provider,
+                            settings=settings,
+                        )
+                except (NoEvidenceError, UnsupportedQuestionError):
+                    yield AbstentionEvent(message=_ABSTENTION_MESSAGE).model_dump_json() + "\n"
+                    terminal = True
+                    return
                 for claim_index, claim in enumerate(answer.claims):
                     if claim_index:
                         yield DeltaEvent(text=" ").model_dump_json() + "\n"
@@ -185,15 +227,10 @@ def create_app(
                 yield CompletedEvent().model_dump_json() + "\n"
                 terminal = True
             except Exception:
+                # The client only sees the safe message; the server log keeps the cause.
+                logger.exception("answer stream failed")
                 if not terminal:
-                    message = (
-                        "The answer could not be generated. Check the course and "
-                        "question, then try again."
-                    )
-                    yield ErrorEvent(message=message).model_dump_json() + "\n"
-            finally:
-                if owned_engine is not None:
-                    owned_engine.dispose()
+                    yield ErrorEvent(message=_ERROR_MESSAGE).model_dump_json() + "\n"
 
         return StreamingResponse(events(), media_type="application/x-ndjson")
 

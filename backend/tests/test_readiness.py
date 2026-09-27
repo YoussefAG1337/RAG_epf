@@ -56,3 +56,11 @@ def test_startup_schema_mismatch_prevents_readiness() -> None:
     with pytest.raises(EmbeddingSchemaMismatchError, match="does not match migrated metadata"):
         with TestClient(application):
             pass
+
+
+def test_readiness_also_allows_the_loopback_ip_origin() -> None:
+    response = TestClient(create_app(schema_guard=None)).get(
+        "/api/v1/readiness", headers={"Origin": "http://127.0.0.1:3000"}
+    )
+
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"

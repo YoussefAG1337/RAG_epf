@@ -1,6 +1,7 @@
 """Offline stream endpoint contract tests."""
 
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -8,7 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from app.answering import AnswerCitation, AnswerClaim, GroundedAnswer
+from app.answering import (
+    AnswerCitation,
+    AnswerClaim,
+    CourseSummary,
+    GroundedAnswer,
+    NoEvidenceError,
+    UnsupportedQuestionError,
+)
 from app.config import Settings
 from app.main import create_app
 from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
@@ -23,6 +31,10 @@ def test_stream_emits_deltas_citations_then_one_completion(monkeypatch) -> None:
             citations=[
                 AnswerCitation(
                     citation_id="chunk-1",
+                    subject="Informatique",
+                    course_id="course-1",
+                    document_title="Lesson",
+                    section_title=None,
                     source_filename="lesson.pdf",
                     physical_page_number=3,
                     excerpt="Source excerpt.",
@@ -44,7 +56,8 @@ def test_stream_emits_deltas_citations_then_one_completion(monkeypatch) -> None:
     assert all(len(delta) <= 80 for delta in deltas)
     assert "".join(deltas) == answer_text
     assert parsed[-2]["citations"][0] == {
-        "citation_id": "chunk-1", "source_filename": "lesson.pdf",
+        "citation_id": "chunk-1", "subject": "Informatique", "course_id": "course-1",
+        "document_title": "Lesson", "section_title": None, "source_filename": "lesson.pdf",
         "physical_page_number": 3, "excerpt": "Source excerpt.",
     }
     assert parsed[-1] == {"version": 1, "type": "completed"}
@@ -158,6 +171,10 @@ def test_gemini_adapters_run_real_answer_flow_and_stream_same_course_citation() 
             assert "course-a" in compiled.params.values()
             row = SimpleNamespace(
                 id=chunk_id,
+                subject="Informatique",
+                course_id="course-a",
+                title="Lesson",
+                section_title="Retrieval",
                 physical_page_number=4,
                 text="The material teaches semantic retrieval.",
                 source_filename="lesson.pdf",
@@ -196,6 +213,10 @@ def test_gemini_adapters_run_real_answer_flow_and_stream_same_course_citation() 
     assert events[-2]["citations"] == [
         {
             "citation_id": str(chunk_id),
+            "subject": "Informatique",
+            "course_id": "course-a",
+            "document_title": "Lesson",
+            "section_title": "Retrieval",
             "source_filename": "lesson.pdf",
             "physical_page_number": 4,
             "excerpt": "The material teaches semantic retrieval.",
@@ -224,9 +245,94 @@ def test_gemini_providers_close_when_schema_validation_fails(monkeypatch) -> Non
         raise RuntimeError("schema mismatch")
 
     settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
-    app = create_app(schema_guard=fail_schema, settings_factory=lambda: settings)
+    offline_engine = SimpleNamespace(
+        connect=lambda: nullcontext(object()), dispose=lambda: None
+    )
+    app = create_app(
+        schema_guard=fail_schema,
+        engine_factory=lambda _settings: offline_engine,  # type: ignore[arg-type,return-value]
+        settings_factory=lambda: settings,
+    )
 
     with pytest.raises(RuntimeError, match="schema mismatch"), TestClient(app):
         pass
 
     assert closed == ["embed", "generate"]
+
+
+@pytest.mark.parametrize("failure", [NoEvidenceError, UnsupportedQuestionError])
+def test_unanswerable_question_streams_one_abstention(monkeypatch, failure) -> None:
+    async def abstain(**_kwargs: object) -> GroundedAnswer:
+        raise failure("no evidence")
+
+    monkeypatch.setattr("app.main.answer_question", abstain)
+    response = TestClient(create_app(schema_guard=None)).post(
+        "/api/v1/answers/stream", json={"course_id": "course-1", "question": "Why?"}
+    )
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    assert len(events) == 1
+    assert events[0]["type"] == "abstention"
+    assert "couldn't find this in the course material" in events[0]["message"]
+
+
+def test_omitted_course_asks_across_all_courses(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def answer_question(**kwargs: object) -> GroundedAnswer:
+        captured.update(kwargs)
+        return GroundedAnswer(claims=[], citations=[])
+
+    monkeypatch.setattr("app.main.answer_question", answer_question)
+    response = TestClient(create_app(schema_guard=None)).post(
+        "/api/v1/answers/stream", json={"question": "Why?"}
+    )
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    assert captured["course_id"] is None
+    assert captured["subject"] is None
+    assert [event["type"] for event in events] == ["citations", "completed"]
+
+
+def test_subject_scope_is_passed_to_answering(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def answer_question(**kwargs: object) -> GroundedAnswer:
+        captured.update(kwargs)
+        return GroundedAnswer(claims=[], citations=[])
+
+    monkeypatch.setattr("app.main.answer_question", answer_question)
+    TestClient(create_app(schema_guard=None)).post(
+        "/api/v1/answers/stream", json={"subject": "Informatique", "question": "Why?"}
+    )
+    assert (captured["subject"], captured["course_id"]) == ("Informatique", None)
+
+    blank = TestClient(create_app(schema_guard=None)).post(
+        "/api/v1/answers/stream", json={"subject": " ", "question": "Why?"}
+    )
+    assert json.loads(blank.text.splitlines()[0])["type"] == "error"
+
+
+def test_courses_endpoint_lists_ingested_courses(monkeypatch) -> None:
+    session_factory = object()
+    seen: list[object] = []
+
+    def list_courses(factory: object) -> list[CourseSummary]:
+        seen.append(factory)
+        return [
+            CourseSummary(
+                subject="Informatique", course_id="algo-101", document_count=2, page_count=40
+            )
+        ]
+
+    monkeypatch.setattr("app.main.list_courses", list_courses)
+    response = TestClient(
+        create_app(schema_guard=None, session_factory=session_factory)  # type: ignore[arg-type]
+    ).get("/api/v1/courses")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "courses": [
+            {"subject": "Informatique", "course_id": "algo-101", "document_count": 2,
+             "page_count": 40}
+        ]
+    }
+    assert seen == [session_factory]

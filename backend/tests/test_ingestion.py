@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
+import pymupdf
 import pytest
 from pypdf import PdfWriter
 from sqlalchemy.exc import IntegrityError
@@ -18,9 +20,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.ingestion import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
+    DEFAULT_SUBJECT,
+    EMBEDDING_BATCH_SIZE,
     IngestionError,
     chunk_page_text,
-    ingest_pdf,
+    discover_course_files,
+    ingest_document,
 )
 from app.models import Document, DocumentChunk
 from app.providers.deterministic import DeterministicEmbeddingProvider
@@ -80,6 +85,7 @@ class _FakeSession:
         self.factory = factory
         self.document: Document | None = None
         self.chunks: list[DocumentChunk] = []
+        self.deleted_ids: set[UUID] = set()
 
     def __enter__(self) -> _FakeSession:
         return self
@@ -113,6 +119,19 @@ class _FakeSession:
         )
         return type("Rows", (), {"all": lambda _self: rows})()
 
+    def execute(self, statement: Any) -> Any:
+        # Only the superseded-version delete is issued through execute.
+        course_id, source_filename, kept_id = statement.compile().params.values()
+        doomed = {
+            item.id
+            for item in self.factory.documents
+            if item.course_id == course_id
+            and item.source_filename == source_filename
+            and item.id != kept_id
+        }
+        self.deleted_ids |= doomed
+        return type("Result", (), {"rowcount": len(doomed)})()
+
     def add(self, item: Any) -> None:
         if isinstance(item, Document):
             self.document = item
@@ -140,6 +159,13 @@ class _FakeTransaction(AbstractContextManager[_FakeSession]):
             self.factory.rollbacks += 1
             raise IntegrityError("commit", {}, RuntimeError("simulated commit failure"))
         if exc_type is None:
+            deleted = self.session.deleted_ids
+            self.factory.documents[:] = [
+                item for item in self.factory.documents if item.id not in deleted
+            ]
+            self.factory.chunks[:] = [
+                chunk for chunk in self.factory.chunks if chunk.document_id not in deleted
+            ]
             if self.session.document is not None:
                 old = next(
                     (index for index, item in enumerate(self.factory.documents)
@@ -170,21 +196,41 @@ class _FakeSessionFactory:
         return _FakeSession(self)
 
 
+def _slides_pdf(
+    slides: Sequence[tuple[str | None, str]], *, footer: str | None = None
+) -> bytes:
+    """Create a 16:9 slide deck: large titles, wrapped body text, optional small footer."""
+
+    document = pymupdf.open()
+    for number, (title, body) in enumerate(slides, start=1):
+        page = document.new_page(width=960, height=540)
+        if title:
+            page.insert_text((40, 60), title, fontsize=28)
+        if body:
+            page.insert_textbox(pymupdf.Rect(40, 100, 920, 500), body, fontsize=16)
+        if footer:
+            page.insert_text((40, 528), footer, fontsize=9)
+            page.insert_text((900, 528), f"{number} / {len(slides)}", fontsize=9)
+    return bytes(document.tobytes())
+
+
 def _session_factory(factory: _FakeSessionFactory) -> sessionmaker[Session]:
     return cast(sessionmaker[Session], factory)
 
 
 async def _run_ingestion(
     source_directory: Path,
-    selected_pdf: str,
+    selected_file: str,
     course_id: str,
     database: _FakeSessionFactory,
     *,
     provider: Any | None = None,
+    subject: str = "subject-a",
 ) -> Any:
-    return await ingest_pdf(
+    return await ingest_document(
         source_directory=source_directory,
-        selected_pdf=selected_pdf,
+        selected_file=selected_file,
+        subject=subject,
         course_id=course_id,
         session_factory=_session_factory(database),
         embedding_provider=provider or DeterministicEmbeddingProvider(),
@@ -218,7 +264,13 @@ def test_ingest_extracts_text_pages_and_keeps_provenance(tmp_path: Path) -> None
     source = tmp_path / "pdfs"
     source.mkdir()
     (source / "lesson.pdf").write_bytes(
-        _text_pdf(["First page course text.", "", "Third page " + ("details. " * 180)])
+        _slides_pdf(
+            [
+                (None, "First page course text."),
+                (None, ""),
+                (None, "Third page " + ("details. " * 180)),
+            ]
+        )
     )
     database = _FakeSessionFactory()
 
@@ -434,8 +486,8 @@ def test_invalid_or_escaping_source_is_rejected_before_database_writes(
 
     with pytest.raises(IngestionError, match="parent-directory traversal"):
         asyncio.run(_run_ingestion(source, "../outside.pdf", "course-a", database))
-    with pytest.raises(IngestionError, match=".pdf extension"):
-        asyncio.run(_run_ingestion(source, "notes.txt", "course-a", database))
+    with pytest.raises(IngestionError, match="one of these extensions"):
+        asyncio.run(_run_ingestion(source, "notes.docx", "course-a", database))
 
     source_pdf = source / "escape.pdf"
     source_pdf.write_bytes(_text_pdf(["local text"]))
@@ -468,7 +520,7 @@ def test_encrypted_or_malformed_pdf_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(IngestionError, match="encrypted"):
         asyncio.run(_run_ingestion(source, "encrypted.pdf", "course-a", database))
-    with pytest.raises(IngestionError, match="could not read PDF"):
+    with pytest.raises(IngestionError, match="could not read broken.pdf"):
         asyncio.run(_run_ingestion(source, "broken.pdf", "course-a", database))
     assert database.documents == []
 
@@ -540,3 +592,105 @@ def test_invalid_course_id_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(IngestionError, match="course ID must not be empty"):
         asyncio.run(_run_ingestion(tmp_path, "missing.pdf", "  ", database))
+
+
+def test_changed_pdf_replaces_its_previous_version_in_the_same_course(tmp_path: Path) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    pdf = source / "lesson.pdf"
+    database = _FakeSessionFactory()
+
+    pdf.write_bytes(_text_pdf(["Original course text."]))
+    asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+    asyncio.run(_run_ingestion(source, "lesson.pdf", "course-b", database))
+    pdf.write_bytes(_text_pdf(["Updated course text."]))
+    result = asyncio.run(_run_ingestion(source, "lesson.pdf", "course-a", database))
+
+    assert result.replaced_documents == 1
+    course_a = [document for document in database.documents if document.course_id == "course-a"]
+    assert [document.checksum for document in course_a] == [result.checksum]
+    assert {chunk.text for chunk in database.chunks if chunk.course_id == "course-a"} == {
+        "Updated course text."
+    }
+    # The same filename in another course is a different document and stays.
+    assert any(document.course_id == "course-b" for document in database.documents)
+
+
+def test_batch_capable_provider_is_called_in_bounded_batches(tmp_path: Path) -> None:
+    source = tmp_path / "pdfs"
+    source.mkdir()
+    pages = [
+        (None, f"Page {index} " + ("content. " * 20)) for index in range(EMBEDDING_BATCH_SIZE + 5)
+    ]
+    (source / "lesson.pdf").write_bytes(_slides_pdf(pages))
+    batch_sizes: list[int] = []
+
+    class BatchProvider:
+        provider_id = "deterministic"
+
+        async def embed(self, _text: str) -> list[float]:
+            raise AssertionError("batch-capable providers must not be called per chunk")
+
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            batch_sizes.append(len(texts))
+            return [[0.5] * 768 for _ in texts]
+
+    database = _FakeSessionFactory()
+    result = asyncio.run(
+        _run_ingestion(source, "lesson.pdf", "course-a", database, provider=BatchProvider())
+    )
+
+    assert batch_sizes == [EMBEDDING_BATCH_SIZE, 5]
+    assert result.chunk_count == EMBEDDING_BATCH_SIZE + 5
+
+
+def test_discover_course_files_reads_subject_and_course_folders(tmp_path: Path) -> None:
+    (tmp_path / "Informatique" / "Algo 101" / "week1").mkdir(parents=True)
+    (tmp_path / "Informatique" / "Algo 101" / "week1" / "intro.PDF").write_bytes(b"%PDF")
+    (tmp_path / "Informatique" / "Algo 101" / "notes.md").write_text("# Notes")
+    (tmp_path / "Informatique" / "Algo 101" / "photo.jpeg").write_bytes(b"jpeg")
+    (tmp_path / "Maths" / "Analyse").mkdir(parents=True)
+    (tmp_path / "Maths" / "Analyse" / "calcul.xlsx").write_bytes(b"xlsx")
+    (tmp_path / "top.pdf").write_bytes(b"%PDF")
+
+    selections, skipped = discover_course_files(tmp_path)
+    assert [(item.subject, item.course_id, item.selected_file) for item in selections] == [
+        ("Informatique", "Algo 101", "Informatique/Algo 101/notes.md"),
+        ("Informatique", "Algo 101", "Informatique/Algo 101/week1/intro.PDF"),
+        ("Maths", "Analyse", "Maths/Analyse/calcul.xlsx"),
+    ]
+    assert [(item.path, item.reason) for item in skipped] == [
+        ("top.pdf", "not inside a course folder"),
+        ("Informatique/Algo 101/photo.jpeg", "unsupported format .jpeg"),
+    ]
+
+    only_maths, _ = discover_course_files(tmp_path, subject="Maths")
+    assert [item.course_id for item in only_maths] == ["Analyse"]
+    only_algo, _ = discover_course_files(tmp_path, course_id="Algo 101")
+    assert {item.subject for item in only_algo} == {"Informatique"}
+
+
+def test_top_level_folders_holding_files_are_courses_under_the_default_subject(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Cryptographie" / "TD").mkdir(parents=True)
+    (tmp_path / "Cryptographie" / "slides.pdf").write_bytes(b"%PDF")
+    (tmp_path / "Cryptographie" / "TD" / "TD1.pdf").write_bytes(b"%PDF")
+    (tmp_path / "stat").mkdir()
+    (tmp_path / "stat" / "QCM.md").write_text("# QCM")
+
+    selections, _ = discover_course_files(tmp_path)
+    assert [(item.subject, item.course_id, item.selected_file) for item in selections] == [
+        (DEFAULT_SUBJECT, "Cryptographie", "Cryptographie/TD/TD1.pdf"),
+        (DEFAULT_SUBJECT, "Cryptographie", "Cryptographie/slides.pdf"),
+        (DEFAULT_SUBJECT, "stat", "stat/QCM.md"),
+    ]
+
+
+def test_discover_course_files_rejects_a_course_under_two_subjects(tmp_path: Path) -> None:
+    for subject in ("Informatique", "Maths"):
+        (tmp_path / subject / "Projet").mkdir(parents=True)
+        (tmp_path / subject / "Projet" / "slides.pdf").write_bytes(b"%PDF")
+
+    with pytest.raises(IngestionError, match="unique across subjects"):
+        discover_course_files(tmp_path)

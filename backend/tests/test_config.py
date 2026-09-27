@@ -72,3 +72,27 @@ def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(
     with pytest.raises(ValidationError, match="GEMINI_API_KEY"):
         IsolatedSettings(rag_provider="gemini")
     assert IsolatedSettings(rag_provider="deterministic").rag_provider == "deterministic"
+
+
+def test_minimum_score_defaults_by_provider_unless_configured() -> None:
+    assert IsolatedSettings().minimum_score == 0.1
+    assert IsolatedSettings(
+        rag_provider="gemini", gemini_api_key=SecretStr("key")
+    ).minimum_score == 0.6
+    assert IsolatedSettings(evidence_minimum_score=0.5).minimum_score == 0.5
+
+
+def test_empty_minimum_score_environment_value_uses_provider_default(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_MINIMUM_SCORE", "")
+    assert IsolatedSettings().evidence_minimum_score is None
+
+
+def test_fallback_answer_models_are_a_comma_separated_list() -> None:
+    assert IsolatedSettings(answer_fallback_models=" a, b ,,c ").fallback_answer_models == (
+        "a",
+        "b",
+        "c",
+    )
+    assert IsolatedSettings(answer_fallback_models="").fallback_answer_models == ()
