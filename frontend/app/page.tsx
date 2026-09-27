@@ -135,11 +135,14 @@ export default function Home() {
         conversationHistory,
       );
       if (streamOutcome.state === "complete" && streamOutcome.historyMessage !== null) {
-        setConversationHistory((history) => [
-          ...history,
-          { role: "user", content: currentQuestion.slice(0, 2000) },
-          { role: "assistant", content: streamOutcome.historyMessage.slice(0, 2000) },
-        ].slice(-12));
+        setConversationHistory((history) => {
+          const nextHistory: ConversationTurn[] = [
+            ...history,
+            { role: "user", content: currentQuestion.slice(0, 2000) },
+            { role: "assistant", content: streamOutcome.historyMessage.slice(0, 2000) },
+          ];
+          return nextHistory.slice(-12);
+        });
       }
     } catch (error) {
       updateAssistant({
