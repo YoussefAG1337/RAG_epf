@@ -1,5 +1,6 @@
 services:
   database:
+    restart: unless-stopped
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-course_rag}
@@ -21,6 +22,7 @@ services:
   # instead, which can use the GPU (Docker on macOS cannot). Enable with
   # --profile docker-embeddings and API_EMBEDDING_URL=http://embeddings:8080.
   embeddings:
+    restart: unless-stopped
     profiles: ["docker-embeddings"]
     build:
       context: ./embeddings
@@ -39,6 +41,7 @@ services:
       start_period: 30m
 
   api:
+    restart: unless-stopped
     build:
       context: ./backend
     environment:
@@ -82,6 +85,7 @@ services:
       retries: 20
 
   web:
+    restart: unless-stopped
     build:
       context: ./frontend
       args:
