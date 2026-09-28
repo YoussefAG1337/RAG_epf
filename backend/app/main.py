@@ -342,8 +342,10 @@ def create_app(
                         yield line
             except (NoEvidenceError, UnsupportedQuestionError):
                 status = "abstained"
-            except AnswerServiceBusyError:
-                logger.warning("answer models are overloaded or rate limited")
+            except AnswerServiceBusyError as error:
+                logger.warning(
+                    "answer models are overloaded or rate limited: %s", error.__cause__
+                )
                 status, error_message = "error", BUSY_MESSAGE
             except Exception:
                 # The client only sees the safe message; the server log keeps the cause.
