@@ -4,6 +4,7 @@ Embeddings are computed locally (see providers/local.py); Gemini only writes ans
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 from google import genai
@@ -11,6 +12,8 @@ from google.genai import errors, types
 from pydantic import SecretStr
 
 from app.providers.protocols import ProviderConfigurationError, ProviderUnavailableError
+
+logger = logging.getLogger(__name__)
 
 # Overload and rate-limit responses that another model may still serve.
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 503, 504})
@@ -74,10 +77,14 @@ class GeminiGenerationProvider:
                     timeout=self._stall_timeout,
                 )
             except errors.APIError as error:
+                logger.warning("Gemini model %s failed: %s %s", model, error.code, error.status)
                 if self._should_fall_back(error, position):
                     continue
                 raise self._unavailable(error) from error
             except TimeoutError as error:
+                logger.warning(
+                    "Gemini model %s sent nothing for %.0f s", model, self._stall_timeout
+                )
                 if position < len(self._models) - 1:
                     continue
                 raise ProviderUnavailableError("Gemini stopped responding") from error
@@ -113,10 +120,14 @@ class GeminiGenerationProvider:
                         started = True
                         yield chunk.text
             except errors.APIError as error:
+                logger.warning("Gemini model %s failed: %s %s", model, error.code, error.status)
                 if not started and self._should_fall_back(error, position):
                     continue
                 raise self._unavailable(error) from error
             except TimeoutError as error:
+                logger.warning(
+                    "Gemini model %s sent nothing for %.0f s", model, self._stall_timeout
+                )
                 if not started and position < len(self._models) - 1:
                     continue
                 raise ProviderUnavailableError("Gemini stopped responding") from error
