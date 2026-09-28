@@ -53,6 +53,7 @@ from app.providers.deterministic import (
     DeterministicGenerationProvider,
 )
 from app.providers.gemini import GeminiGenerationProvider
+from app.providers.groq import GroqGenerationProvider
 from app.providers.local import LocalEmbeddingProvider
 from app.providers.protocols import EmbeddingProvider, GenerationProvider
 from app.schema_guard import validate_embedding_schema
@@ -120,6 +121,22 @@ def _line(event: BaseModel) -> str:
     return event.model_dump_json() + "\n"
 
 
+def _generation_provider(settings: Settings) -> GenerationProvider:
+    if settings.answer_provider == "gemini":
+        return GeminiGenerationProvider(
+            settings.gemini_api_key,
+            model=settings.answer_model,
+            fallback_models=settings.fallback_answer_models,
+        )
+    if settings.answer_provider == "groq":
+        return GroqGenerationProvider(
+            settings.groq_api_key,
+            model=settings.answer_model,
+            fallback_models=settings.fallback_answer_models,
+        )
+    return DeterministicGenerationProvider()
+
+
 def create_app(
     *,
     schema_guard: Callable[[Connection, Settings], None] | None = validate_embedding_schema,
@@ -154,15 +171,7 @@ def create_app(
                 if settings.embedding_provider == "local"
                 else DeterministicEmbeddingProvider(settings.embedding_dimensions)
             )
-            shared["generation"] = generation_provider or (
-                GeminiGenerationProvider(
-                    settings.gemini_api_key,
-                    model=settings.answer_model,
-                    fallback_models=settings.fallback_answer_models,
-                )
-                if settings.answer_provider == "gemini"
-                else DeterministicGenerationProvider()
-            )
+            shared["generation"] = generation_provider or _generation_provider(settings)
         return shared["embedding"], shared["generation"]
 
     @asynccontextmanager
@@ -181,8 +190,11 @@ def create_app(
         finally:
             generation = shared.get("generation")
             if generation is not None and generation_provider is None:
+                aclose = getattr(generation, "aclose", None)
                 close = getattr(generation, "close", None)
-                if close is not None:
+                if aclose is not None:
+                    await aclose()
+                elif close is not None:
                     close()
             embedding = shared.get("embedding")
             if embedding is not None and embedding_provider is None:
@@ -343,9 +355,7 @@ def create_app(
             except (NoEvidenceError, UnsupportedQuestionError):
                 status = "abstained"
             except AnswerServiceBusyError as error:
-                logger.warning(
-                    "answer models are overloaded or rate limited: %s", error.__cause__
-                )
+                logger.warning("answer models are overloaded or rate limited: %s", error.__cause__)
                 status, error_message = "error", BUSY_MESSAGE
             except Exception:
                 # The client only sees the safe message; the server log keeps the cause.

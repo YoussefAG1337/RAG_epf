@@ -32,11 +32,12 @@ class Settings(BaseSettings):
     database_password: SecretStr = SecretStr("local-development-only")
     pdf_source_dir: Path = Path("data/course-pdfs")
     gemini_api_key: SecretStr | None = None
+    groq_api_key: SecretStr | None = None
     # "local": the embeddings container; "deterministic": offline lexical vectors (tests).
     embedding_provider: Literal["local", "deterministic"] = "deterministic"
     embedding_url: str = "http://localhost:8081"
-    # "gemini": written answers; "deterministic": the best excerpt, offline (tests).
-    answer_provider: Literal["gemini", "deterministic"] = "deterministic"
+    # "gemini" / "groq": written answers; "deterministic": the best excerpt, offline (tests).
+    answer_provider: Literal["gemini", "groq", "deterministic"] = "deterministic"
     answer_model: str = "gemini-3.8-flash"
     # Comma-separated models tried in order when the answer model is overloaded (503) or
     # rate limited (429); empty disables. Free-tier demand spikes can hit several at once.
@@ -67,6 +68,10 @@ class Settings(BaseSettings):
             self.gemini_api_key is None or not self.gemini_api_key.get_secret_value()
         ):
             raise ValueError("GEMINI_API_KEY is required when ANSWER_PROVIDER=gemini")
+        if self.answer_provider == "groq" and (
+            self.groq_api_key is None or not self.groq_api_key.get_secret_value()
+        ):
+            raise ValueError("GROQ_API_KEY is required when ANSWER_PROVIDER=groq")
         if self.retrieval_limit < 1:
             raise ValueError("retrieval_limit must be greater than zero")
         if self.evidence_minimum_score is not None and not (

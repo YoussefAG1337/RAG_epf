@@ -59,6 +59,7 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
       ANSWER_PROVIDER: ${ANSWER_PROVIDER:-gemini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       ANSWER_MODEL: ${ANSWER_MODEL:-gemini-3.8-flash}
       ANSWER_FALLBACK_MODELS: ${ANSWER_FALLBACK_MODELS-gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite}
       RETRIEVAL_LIMIT: ${RETRIEVAL_LIMIT:-8}

@@ -97,3 +97,10 @@ def test_fallback_answer_models_are_a_comma_separated_list() -> None:
         "c",
     )
     assert IsolatedSettings(answer_fallback_models="").fallback_answer_models == ()
+
+
+def test_groq_mode_requires_a_groq_key() -> None:
+    with pytest.raises(ValueError, match="GROQ_API_KEY"):
+        IsolatedSettings(answer_provider="groq")
+    settings = IsolatedSettings(answer_provider="groq", groq_api_key=SecretStr("test-secret"))
+    assert settings.answer_provider == "groq"

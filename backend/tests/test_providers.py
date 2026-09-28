@@ -15,6 +15,7 @@ from app.providers.deterministic import (
     DeterministicGenerationProvider,
 )
 from app.providers.gemini import GeminiGenerationProvider
+from app.providers.groq import GroqGenerationProvider
 from app.providers.local import EmbeddingServiceError, LocalEmbeddingProvider
 from app.providers.protocols import ProviderConfigurationError, ProviderUnavailableError
 
@@ -250,3 +251,104 @@ def test_gemini_moves_on_when_a_model_stops_responding() -> None:
     )
     with pytest.raises(ProviderUnavailableError, match="stopped responding"):
         asyncio.run(collect(only))
+
+
+def _groq(
+    handler: Any, fallbacks: tuple[str, ...] = ("fallback",), stall_timeout: float = 30.0
+) -> GroqGenerationProvider:
+    return GroqGenerationProvider(
+        SecretStr("test-only"),
+        model="primary",
+        fallback_models=fallbacks,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        stall_timeout=stall_timeout,
+    )
+
+
+def _groq_sse(*pieces: str) -> bytes:
+    events = [
+        "data: " + json.dumps({"choices": [{"delta": {"content": piece}}]}) for piece in pieces
+    ]
+    return ("\n\n".join([*events, "data: [DONE]"]) + "\n\n").encode()
+
+
+async def _collect_groq(provider: GroqGenerationProvider) -> str:
+    return "".join([piece async for piece in provider.generate_stream("prompt")])
+
+
+def test_groq_requires_credentials_only_when_invoked() -> None:
+    with pytest.raises(ProviderConfigurationError, match="GROQ_API_KEY"):
+        asyncio.run(GroqGenerationProvider(None).generate("prompt"))
+
+
+def test_groq_asks_for_json_answers_and_plain_text_rewrites() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"claims": []}'}}]})
+
+    provider = _groq(handler)
+    assert asyncio.run(provider.generate("prompt")) == '{"claims": []}'
+    asyncio.run(provider.generate("prompt", json_output=False))
+    assert bodies[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in bodies[1]
+    assert bodies[0]["messages"] == [{"role": "user", "content": "prompt"}]
+
+
+def test_groq_falls_back_on_overload_but_not_on_bad_requests() -> None:
+    calls: list[str] = []
+
+    def handler_for(status: int) -> Any:
+        def handler(request: httpx.Request) -> httpx.Response:
+            model = json.loads(request.content)["model"]
+            calls.append(model)
+            if model == "primary":
+                return httpx.Response(status, json={"error": {"message": "no"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+        return handler
+
+    assert asyncio.run(_groq(handler_for(429)).generate("prompt")) == "{}"
+    assert calls == ["primary", "fallback"]
+
+    calls.clear()
+    with pytest.raises(RuntimeError, match="400"):
+        asyncio.run(_groq(handler_for(400)).generate("prompt"))
+    assert calls == ["primary"]
+
+
+def test_groq_reports_unavailable_when_every_model_is_busy() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "over capacity"}})
+
+    with pytest.raises(ProviderUnavailableError, match="last: 503"):
+        asyncio.run(_groq(handler).generate("prompt"))
+    with pytest.raises(ProviderUnavailableError):
+        asyncio.run(_collect_groq(_groq(handler)))
+
+
+def test_groq_streams_and_falls_back_before_the_first_chunk() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body["model"])
+        assert body["stream"] is True
+        if body["model"] == "primary":
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx.Response(200, content=_groq_sse('{"claims"', ": []}"))
+
+    assert asyncio.run(_collect_groq(_groq(handler))) == '{"claims": []}'
+    assert calls == ["primary", "fallback"]
+
+
+def test_groq_moves_on_when_a_model_stops_responding() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["model"] == "primary":
+            await asyncio.sleep(10)  # accepted, then never answers
+        return httpx.Response(200, content=_groq_sse('{"claims": []}'))
+
+    assert asyncio.run(_collect_groq(_groq(handler, stall_timeout=0.05))) == '{"claims": []}'
+    with pytest.raises(ProviderUnavailableError, match="stopped responding"):
+        asyncio.run(_collect_groq(_groq(handler, fallbacks=(), stall_timeout=0.05)))
