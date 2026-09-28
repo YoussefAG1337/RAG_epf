@@ -28,6 +28,10 @@ services:
       context: ./embeddings
     environment:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      # Passages encoded at once; smaller uses less memory (default 16 on CPU).
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-}
+    # On a shared server, the kernel otherwise kills whichever process it picks.
+    mem_limit: ${EMBEDDING_MEMORY_LIMIT:-6g}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/models
     ports:
