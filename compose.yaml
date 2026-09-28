@@ -6,8 +6,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-course_rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}
     ports:
-      # Host port; set DATABASE_PORT in .env if another PostgreSQL already uses 5432.
-      - "${DATABASE_PORT:-5432}:5432"
+      # Host port, reachable only from this machine; set DATABASE_PORT in .env if another
+      # PostgreSQL already uses 5432.
+      - "127.0.0.1:${DATABASE_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -29,7 +30,7 @@ services:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/models
     ports:
       # Host port used by the ingestion command run outside Docker.
-      - "${EMBEDDING_PORT:-8081}:8080"
+      - "127.0.0.1:${EMBEDDING_PORT:-8081}:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import json, urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8080/health', timeout=2))['ready']"]
       interval: 10s
@@ -66,7 +67,8 @@ services:
       # Makes host.docker.internal resolve on Linux too (built in on Docker Desktop).
       - "host.docker.internal:host-gateway"
     ports:
-      - "8000:8000"
+      # Local only: on a server, a reverse proxy (nginx) forwards /api/ here.
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     depends_on:
       database:
         condition: service_healthy
@@ -86,7 +88,7 @@ services:
         # Inlined into the browser bundle at build time.
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
     depends_on:
       api:
         condition: service_healthy
