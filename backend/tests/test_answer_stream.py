@@ -1,338 +1,289 @@
-"""Offline stream endpoint contract tests."""
+"""Offline tests for the answer stream (v2), document endpoints, and conversation API."""
+
+from __future__ import annotations
 
 import json
-from contextlib import nullcontext
-from types import SimpleNamespace
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
 
+from app import main
 from app.answering import (
-    AnswerCitation,
-    AnswerClaim,
-    CourseSummary,
-    GroundedAnswer,
+    AnswerEvent,
+    AnswerServiceBusyError,
+    Citation,
+    Claim,
+    Highlight,
+    HistoryTurn,
     NoEvidenceError,
-    UnsupportedQuestionError,
+    Scope,
 )
 from app.config import Settings
-from app.main import create_app
-from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
+from app.documents import DocumentInfo, DocumentKind, DocumentMissingError
+
+CONVERSATION = UUID("00000000-0000-0000-0000-0000000000c1")
+DOCUMENT = UUID("00000000-0000-0000-0000-0000000000d1")
 
 
-def test_stream_emits_deltas_citations_then_one_completion(monkeypatch) -> None:
-    answer_text = "Supported answer sentence with enough words to exceed eighty characters. " * 3
-
-    async def answer_question(**_kwargs: object) -> GroundedAnswer:
-        return GroundedAnswer(
-            claims=[AnswerClaim(text=answer_text, citation_ids=["chunk-1"])],
-            citations=[
-                AnswerCitation(
-                    citation_id="chunk-1",
-                    subject="Informatique",
-                    course_id="course-1",
-                    document_title="Lesson",
-                    section_title=None,
-                    source_filename="lesson.pdf",
-                    physical_page_number=3,
-                    excerpt="Source excerpt.",
-                )
-            ],
-        )
-
-    monkeypatch.setattr("app.main.answer_question", answer_question)
-    events = [line for line in TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"course_id": "course-1", "question": "Why?"}
-    ).text.splitlines() if line]
-    import json
-    parsed = [json.loads(line) for line in events]
-    assert [event["type"] for event in parsed] == [
-        "delta", "delta", "delta", "citations", "completed"
-    ]
-    deltas = [event["text"] for event in parsed if event["type"] == "delta"]
-    assert all(deltas)
-    assert all(len(delta) <= 80 for delta in deltas)
-    assert "".join(deltas) == answer_text
-    assert parsed[-2]["citations"][0] == {
-        "citation_id": "chunk-1", "subject": "Informatique", "course_id": "course-1",
-        "document_title": "Lesson", "section_title": None, "source_filename": "lesson.pdf",
-        "physical_page_number": 3, "excerpt": "Source excerpt.",
-    }
-    assert parsed[-1] == {"version": 1, "type": "completed"}
-
-
-def test_stream_failure_is_one_safe_terminal_error(monkeypatch) -> None:
-    async def fail(**_kwargs: object) -> GroundedAnswer:
-        raise RuntimeError("secret details")
-
-    monkeypatch.setattr("app.main.answer_question", fail)
-    response = TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"course_id": "course-1", "question": "Why?"}
+def _citation() -> Citation:
+    return Citation(
+        number=1,
+        chunk_id="chunk",
+        document_id=str(DOCUMENT),
+        subject="Général",
+        course_id="Cryptographie",
+        document_title="Introduction à la cryptologie",
+        section_title="RSA",
+        source_filename="Cryptographie/slides.pdf",
+        page=52,
+        excerpt="Bob choisit deux grands nombres premiers p et q.",
+        quotes=["deux grands nombres premiers"],
+        highlights=[Highlight(page=52, boxes=[[0.1, 0.2, 0.6, 0.25]], lines=[])],
     )
-    import json
-    events = [json.loads(line) for line in response.text.splitlines() if line]
-    assert len(events) == 1
-    assert events[0]["type"] == "error"
-    assert "secret" not in response.text
 
 
-def test_stream_separates_multiple_claims(monkeypatch) -> None:
-    async def answer_question(**_kwargs: object) -> GroundedAnswer:
-        return GroundedAnswer(
-            claims=[
-                AnswerClaim(text="First claim.", citation_ids=["chunk-1"]),
-                AnswerClaim(text="Second claim.", citation_ids=["chunk-2"]),
-            ],
-            citations=[],
-        )
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace conversation storage with in-memory recording."""
 
-    monkeypatch.setattr("app.main.answer_question", answer_question)
-    response = TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"course_id": "course-1", "question": "Why?"}
-    )
-    import json
-    events = [json.loads(line) for line in response.text.splitlines() if line]
-    streamed_text = "".join(
-        event["text"] for event in events if event["type"] == "delta"
-    )
-    assert streamed_text == "First claim. Second claim."
+    record: dict[str, Any] = {"started": [], "appended": []}
 
+    def start(
+        _factory: object, conversation_id: UUID | None, question: str, scope: dict[str, str]
+    ) -> Any:
+        record["started"].append((conversation_id, question, scope))
+        history = [HistoryTurn("user", "Question précédente")] if conversation_id else []
+        return CONVERSATION, history
 
-def test_empty_stream_request_returns_safe_terminal_error() -> None:
-    response = TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"course_id": " ", "question": "Why?"}
-    )
-    import json
-    events = [json.loads(line) for line in response.text.splitlines() if line]
-    assert len(events) == 1
-    assert events[0]["type"] == "error"
-    assert "Check the course and question" in events[0]["message"]
+    def append(_factory: object, conversation_id: UUID, messages: list[Any]) -> list[UUID]:
+        record["appended"].append((conversation_id, messages))
+        return [UUID(int=1), UUID(int=2)]
+
+    monkeypatch.setattr(main, "start_or_continue", start)
+    monkeypatch.setattr(main, "append_messages", append)
+    return record
 
 
-def test_gemini_runtime_selects_matching_embedding_and_generation_adapters(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+def _client(**kwargs: Any) -> TestClient:
+    return TestClient(main.create_app(schema_guard=None, session_factory=object(), **kwargs))  # type: ignore[arg-type]
 
-    async def answer_question(**kwargs: object) -> GroundedAnswer:
+
+def _stream(client: TestClient, body: dict[str, Any]) -> list[dict[str, Any]]:
+    response = client.post("/api/v1/answers/stream", json=body)
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    return [json.loads(line) for line in response.text.splitlines() if line]
+
+
+def test_answer_streams_claims_then_citations_and_saves_the_exchange(
+    monkeypatch: pytest.MonkeyPatch, recorded: dict[str, Any]
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_events(**kwargs: Any) -> AsyncIterator[AnswerEvent]:
         captured.update(kwargs)
-        return GroundedAnswer(claims=[], citations=[])
-
-    monkeypatch.setattr("app.main.answer_question", answer_question)
-    settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
-    with TestClient(create_app(schema_guard=None, settings_factory=lambda: settings)) as client:
-        response = client.post(
-            "/api/v1/answers/stream", json={"course_id": "course-a", "question": "Question?"}
+        yield AnswerEvent(kind="retrieved", retrieval_query="Comment RSA génère-t-il ses clés ?")
+        yield AnswerEvent(
+            kind="claim", claim=Claim(text="On choisit p et q premiers.", citations=[1])
         )
+        yield AnswerEvent(kind="claim", claim=Claim(text="On calcule n = pq.", citations=[1]))
+        yield AnswerEvent(kind="citations", citations=[_citation()])
 
-    assert response.status_code == 200
-    assert isinstance(captured["embedding_provider"], GeminiEmbeddingProvider)
-    assert isinstance(captured["generation_provider"], GeminiGenerationProvider)
-
-
-def test_gemini_adapters_run_real_answer_flow_and_stream_same_course_citation() -> None:
-    chunk_id = UUID("00000000-0000-0000-0000-000000000123")
-    calls: list[tuple[str, str]] = []
-
-    class FakeModels:
-        async def embed_content(self, *, model, contents, config):
-            calls.append(("embed", model))
-            assert contents == "What is taught?"
-            assert config.output_dimensionality == 768
-            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.125] * 768)])
-
-        async def generate_content(self, *, model, contents, config):
-            calls.append(("generate", model))
-            evidence = json.loads(contents.rsplit("Evidence:\n", maxsplit=1)[1])
-            response = json.dumps(
-                {
-                    "claims": [
-                        {"text": "The material teaches semantic retrieval.",
-                         "citation_ids": [evidence[0]["citation_id"]]}
-                    ]
-                }
-            )
-            return SimpleNamespace(text=response)
-
-    class FakeSDKClient:
-        def __init__(self) -> None:
-            self.aio = SimpleNamespace(models=FakeModels())
-
-    class FakeSession:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def execute(self, statement):
-            compiled = statement.compile()
-            assert "document_chunks.course_id" in str(compiled)
-            assert "course-a" in compiled.params.values()
-            row = SimpleNamespace(
-                id=chunk_id,
-                subject="Informatique",
-                course_id="course-a",
-                title="Lesson",
-                section_title="Retrieval",
-                physical_page_number=4,
-                text="The material teaches semantic retrieval.",
-                source_filename="lesson.pdf",
-                distance=0.05,
-            )
-            return SimpleNamespace(all=lambda: [row])
-
-    class FakeSessionFactory:
-        def __call__(self):
-            return FakeSession()
-
-    sdk_client = FakeSDKClient()
-    settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
-    app = create_app(
-        schema_guard=None,
-        session_factory=FakeSessionFactory(),  # type: ignore[arg-type]
-        embedding_provider=GeminiEmbeddingProvider(
-            settings.gemini_api_key, client=sdk_client  # type: ignore[arg-type]
-        ),
-        generation_provider=GeminiGenerationProvider(
-            settings.gemini_api_key, client=sdk_client  # type: ignore[arg-type]
-        ),
-        settings_factory=lambda: settings,
-    )
-    response = TestClient(app).post(
-        "/api/v1/answers/stream",
-        json={"course_id": "course-a", "question": "What is taught?"},
-    )
-    events = [json.loads(line) for line in response.text.splitlines() if line]
-
-    assert calls == [("embed", "gemini-embedding-2"), ("generate", "gemini-3.8-flash")]
-    assert [event["type"] for event in events][-2:] == ["citations", "completed"]
-    assert "".join(event["text"] for event in events if event["type"] == "delta") == (
-        "The material teaches semantic retrieval."
-    )
-    assert events[-2]["citations"] == [
+    monkeypatch.setattr(main, "answer_events", fake_events)
+    events = _stream(
+        _client(),
         {
-            "citation_id": str(chunk_id),
-            "subject": "Informatique",
-            "course_id": "course-a",
-            "document_title": "Lesson",
-            "section_title": "Retrieval",
-            "source_filename": "lesson.pdf",
-            "physical_page_number": 4,
-            "excerpt": "The material teaches semantic retrieval.",
-        }
+            "question": "Et les clés ?",
+            "conversation_id": str(CONVERSATION),
+            "scope": {"course_id": "Cryptographie"},
+        },
+    )
+
+    assert [event["type"] for event in events] == [
+        "conversation",
+        "status",
+        "status",
+        "claim",
+        "claim",
+        "citations",
+        "completed",
     ]
-
-
-def test_gemini_providers_close_when_schema_validation_fails(monkeypatch) -> None:
-    closed: list[str] = []
-
-    class ClosableProvider:
-        def __init__(self, label: str) -> None:
-            self.label = label
-
-        def close(self) -> None:
-            closed.append(self.label)
-
-    monkeypatch.setattr(
-        "app.main.GeminiEmbeddingProvider", lambda *_args, **_kwargs: ClosableProvider("embed")
-    )
-    monkeypatch.setattr(
-        "app.main.GeminiGenerationProvider", lambda *_args, **_kwargs: ClosableProvider("generate")
-    )
-
-    def fail_schema(_connection, _settings) -> None:
-        raise RuntimeError("schema mismatch")
-
-    settings = Settings(rag_provider="gemini", gemini_api_key=SecretStr("server-test-key"))
-    offline_engine = SimpleNamespace(
-        connect=lambda: nullcontext(object()), dispose=lambda: None
-    )
-    app = create_app(
-        schema_guard=fail_schema,
-        engine_factory=lambda _settings: offline_engine,  # type: ignore[arg-type,return-value]
-        settings_factory=lambda: settings,
-    )
-
-    with pytest.raises(RuntimeError, match="schema mismatch"), TestClient(app):
-        pass
-
-    assert closed == ["embed", "generate"]
-
-
-@pytest.mark.parametrize("failure", [NoEvidenceError, UnsupportedQuestionError])
-def test_unanswerable_question_streams_one_abstention(monkeypatch, failure) -> None:
-    async def abstain(**_kwargs: object) -> GroundedAnswer:
-        raise failure("no evidence")
-
-    monkeypatch.setattr("app.main.answer_question", abstain)
-    response = TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"course_id": "course-1", "question": "Why?"}
-    )
-    events = [json.loads(line) for line in response.text.splitlines() if line]
-    assert len(events) == 1
-    assert events[0]["type"] == "abstention"
-    assert "couldn't find this in the course material" in events[0]["message"]
-
-
-def test_omitted_course_asks_across_all_courses(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def answer_question(**kwargs: object) -> GroundedAnswer:
-        captured.update(kwargs)
-        return GroundedAnswer(claims=[], citations=[])
-
-    monkeypatch.setattr("app.main.answer_question", answer_question)
-    response = TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"question": "Why?"}
-    )
-    events = [json.loads(line) for line in response.text.splitlines() if line]
-    assert captured["course_id"] is None
-    assert captured["subject"] is None
-    assert [event["type"] for event in events] == ["citations", "completed"]
-
-
-def test_subject_scope_is_passed_to_answering(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def answer_question(**kwargs: object) -> GroundedAnswer:
-        captured.update(kwargs)
-        return GroundedAnswer(claims=[], citations=[])
-
-    monkeypatch.setattr("app.main.answer_question", answer_question)
-    TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"subject": "Informatique", "question": "Why?"}
-    )
-    assert (captured["subject"], captured["course_id"]) == ("Informatique", None)
-
-    blank = TestClient(create_app(schema_guard=None)).post(
-        "/api/v1/answers/stream", json={"subject": " ", "question": "Why?"}
-    )
-    assert json.loads(blank.text.splitlines()[0])["type"] == "error"
-
-
-def test_courses_endpoint_lists_ingested_courses(monkeypatch) -> None:
-    session_factory = object()
-    seen: list[object] = []
-
-    def list_courses(factory: object) -> list[CourseSummary]:
-        seen.append(factory)
-        return [
-            CourseSummary(
-                subject="Informatique", course_id="algo-101", document_count=2, page_count=40
-            )
-        ]
-
-    monkeypatch.setattr("app.main.list_courses", list_courses)
-    response = TestClient(
-        create_app(schema_guard=None, session_factory=session_factory)  # type: ignore[arg-type]
-    ).get("/api/v1/courses")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "courses": [
-            {"subject": "Informatique", "course_id": "algo-101", "document_count": 2,
-             "page_count": 40}
-        ]
+    assert all(event["version"] == 2 for event in events)
+    assert events[0]["conversation_id"] == str(CONVERSATION)
+    assert events[2] == {
+        "version": 2,
+        "type": "status",
+        "stage": "writing",
+        "retrieval_query": "Comment RSA génère-t-il ses clés ?",
     }
-    assert seen == [session_factory]
+    assert events[3] == {
+        "version": 2,
+        "type": "claim",
+        "index": 0,
+        "text": "On choisit p et q premiers.",
+        "citations": [1],
+    }
+    assert events[5]["citations"][0]["highlights"] == [
+        {"page": 52, "boxes": [[0.1, 0.2, 0.6, 0.25]], "lines": []}
+    ]
+    assert events[6]["message_id"] == str(UUID(int=2))
+    assert captured["scope"] == Scope(course_id="Cryptographie")
+    assert captured["history"][0].content == "Question précédente"
+
+    ((conversation_id, messages),) = recorded["appended"]
+    assert conversation_id == CONVERSATION
+    assert messages[0] == ("user", "Et les clés ?", {"scope": {"course_id": "Cryptographie"}})
+    role, content, payload = messages[1]
+    assert (role, content, payload["status"]) == (
+        "assistant",
+        "On choisit p et q premiers. On calcule n = pq.",
+        "answered",
+    )
+    assert payload["citations"][0]["number"] == 1
+
+
+def test_overloaded_answer_models_get_a_specific_retry_message(
+    monkeypatch: pytest.MonkeyPatch, recorded: dict[str, Any]
+) -> None:
+    async def busy(**_kwargs: Any) -> AsyncIterator[AnswerEvent]:
+        raise AnswerServiceBusyError("busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main, "answer_events", busy)
+    events = _stream(_client(), {"question": "Comment fonctionne RSA ?"})
+
+    assert events[-1]["type"] == "error"
+    assert "saturé" in events[-1]["message"]
+    assert recorded["appended"][0][1][1][1] == events[-1]["message"]
+
+
+def test_missing_evidence_streams_and_saves_an_abstention(
+    monkeypatch: pytest.MonkeyPatch, recorded: dict[str, Any]
+) -> None:
+    async def abstain(**_kwargs: Any) -> AsyncIterator[AnswerEvent]:
+        raise NoEvidenceError("nothing")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main, "answer_events", abstain)
+    events = _stream(_client(), {"question": "Qui a gagné la coupe du monde ?"})
+
+    assert [event["type"] for event in events] == ["conversation", "status", "abstention"]
+    assert "pas trouvé" in events[-1]["message"]
+    payload = recorded["appended"][0][1][1][2]
+    assert payload["status"] == "abstained" and payload["claims"] == []
+
+
+def test_failures_end_with_one_safe_error(
+    monkeypatch: pytest.MonkeyPatch, recorded: dict[str, Any]
+) -> None:
+    async def fail(**_kwargs: Any) -> AsyncIterator[AnswerEvent]:
+        raise RuntimeError("secret provider details")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main, "answer_events", fail)
+    response = _client().post("/api/v1/answers/stream", json={"question": "Pourquoi ?"})
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+
+    assert events[-1]["type"] == "error"
+    assert "secret" not in response.text
+    assert recorded["appended"][0][1][1][2]["status"] == "error"
+
+
+def test_blank_or_oversized_questions_are_rejected_without_a_conversation(
+    recorded: dict[str, Any],
+) -> None:
+    client = _client()
+    for question in ("   ", "x" * 2001):
+        events = _stream(client, {"question": question})
+        assert [event["type"] for event in events] == ["error"]
+    assert recorded["started"] == []
+
+
+def test_scope_rejects_unknown_fields() -> None:
+    response = _client().post(
+        "/api/v1/answers/stream", json={"question": "q", "scope": {"teacher": "x"}}
+    )
+    assert response.status_code == 422
+
+
+def _info(filename: str, kind: DocumentKind = "pdf") -> DocumentInfo:
+    return DocumentInfo(
+        id=str(DOCUMENT),
+        subject="Général",
+        course_id="stat",
+        title="Fiche",
+        source_filename=filename,
+        kind=kind,
+        page_count=1,
+    )
+
+
+def test_document_file_and_content_are_served_from_the_course_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "stat").mkdir()
+    (tmp_path / "stat" / "fiche.md").write_text("# Fiche\n\n| A | B |\n|---|---|\n| 1 | 2 |\n")
+    monkeypatch.setattr(
+        main, "get_document", lambda _factory, _id: _info("stat/fiche.md", "markdown")
+    )
+    client = _client(settings_factory=lambda: Settings(pdf_source_dir=tmp_path))
+
+    file_response = client.get(f"/api/v1/documents/{DOCUMENT}/file")
+    assert file_response.status_code == 200
+    assert file_response.headers["content-type"].startswith("text/markdown")
+    assert file_response.headers["content-disposition"].startswith("inline")
+
+    content = client.get(f"/api/v1/documents/{DOCUMENT}/content").json()
+    assert content["kind"] == "markdown"
+    assert content["lines"][0] == {"line": 1, "text": "# Fiche"}
+    assert content["lines"][4] == {"line": 5, "text": "| 1 | 2 |"}
+
+
+def test_documents_outside_the_course_folder_or_missing_are_not_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(settings_factory=lambda: Settings(pdf_source_dir=tmp_path))
+    monkeypatch.setattr(main, "get_document", lambda _factory, _id: _info("../outside.pdf"))
+    assert client.get(f"/api/v1/documents/{DOCUMENT}/file").status_code == 404
+
+    def missing(_factory: object, _id: UUID) -> DocumentInfo:
+        raise DocumentMissingError("gone")
+
+    monkeypatch.setattr(main, "get_document", missing)
+    assert client.get(f"/api/v1/documents/{DOCUMENT}").status_code == 404
+
+
+def test_conversation_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.conversations import ConversationSummary
+
+    summary = ConversationSummary(
+        id=str(CONVERSATION), title="RSA", scope={}, updated_at=datetime(2026, 9, 28, tzinfo=UTC)
+    )
+    monkeypatch.setattr(main, "list_conversations", lambda _factory: [summary])
+    monkeypatch.setattr(main, "get_conversation", lambda _factory, _id: None)
+    monkeypatch.setattr(
+        main,
+        "rename_conversation",
+        lambda _factory, _id, title: summary.model_copy(update={"title": title}),
+    )
+    deleted: list[UUID] = []
+
+    def delete(_factory: object, conversation_id: UUID) -> bool:
+        deleted.append(conversation_id)
+        return True
+
+    monkeypatch.setattr(main, "delete_conversation", delete)
+    client = _client()
+
+    assert client.get("/api/v1/conversations").json()["conversations"][0]["title"] == "RSA"
+    assert client.get(f"/api/v1/conversations/{CONVERSATION}").status_code == 404
+    assert (
+        client.patch(f"/api/v1/conversations/{CONVERSATION}", json={"title": "AES"}).json()["title"]
+        == "AES"
+    )
+    assert client.delete(f"/api/v1/conversations/{CONVERSATION}").status_code == 204
+    assert deleted == [CONVERSATION]

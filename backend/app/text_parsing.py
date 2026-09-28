@@ -7,7 +7,7 @@ import unicodedata
 from datetime import date, datetime
 from io import BytesIO
 
-from app.parsed import ParsedDocument, ParsedPage, Segment
+from app.parsed import LineRef, ParsedDocument, ParsedPage, Segment
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _FENCE = re.compile(r"^\s*(```|~~~)")
@@ -58,11 +58,33 @@ def parse_markdown(data: bytes) -> ParsedDocument:
         kept = [line.rstrip() for line in lines[start:end] if not _RULE.match(line)]
         return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
+    # Every non-blank file line, numbered from 1, so chunks can be located in the file.
+    line_refs = [
+        LineRef(text=line.strip(), page=1, line=number)
+        for number, line in enumerate(lines, start=1)
+        if line.strip() and not _RULE.match(line)
+    ]
+
+    def indices(start: int, end: int) -> tuple[int, ...]:
+        """Positions in ``line_refs`` of file lines ``start``..``end - 1`` (0-based)."""
+
+        return tuple(
+            position
+            for position, ref in enumerate(line_refs)
+            if ref.line is not None and start < ref.line <= end
+        )
+
     segments: list[Segment] = []
     first_heading_line = headings[0][0] if headings else len(lines)
     preamble = body(body_start, first_heading_line)
     if preamble:
-        segments.append(Segment(heading_path=(), text=preamble))
+        segments.append(
+            Segment(
+                heading_path=(),
+                text=preamble,
+                line_indices=indices(body_start, first_heading_line),
+            )
+        )
     stack: list[tuple[int, str]] = []
     for position, (index, level, heading) in enumerate(headings):
         while stack and stack[-1][0] >= level:
@@ -70,10 +92,18 @@ def parse_markdown(data: bytes) -> ParsedDocument:
         stack.append((level, heading))
         end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
         segments.append(
-            Segment(heading_path=tuple(item for _, item in stack), text=body(index + 1, end))
+            Segment(
+                heading_path=tuple(item for _, item in stack),
+                text=body(index + 1, end),
+                line_indices=indices(index, end),
+            )
         )
 
-    pages = (ParsedPage(number=1, segments=tuple(segments)),) if segments else ()
+    pages = (
+        (ParsedPage(number=1, segments=tuple(segments), lines=tuple(line_refs)),)
+        if segments
+        else ()
+    )
     return ParsedDocument(
         title=title,
         page_count=1,
@@ -115,14 +145,17 @@ def parse_xlsx(data: bytes) -> ParsedDocument:
     try:
         for number, sheet in enumerate(workbook.worksheets, start=1):
             kept_rows: list[str] = []
+            row_refs: list[LineRef] = []
             data_rows = 0
-            for row in sheet.iter_rows(values_only=True):
+            first_row = sheet.min_row or 1
+            for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=first_row):
                 cells = [_cell_text(value) for value in row]
                 cells = [cell for cell in cells if cell]
                 if not cells:
                     continue
                 if any(re.search(r"[^\W\d_]", cell) for cell in cells):
                     kept_rows.append(" | ".join(cells))
+                    row_refs.append(LineRef(text=kept_rows[-1], page=number, line=row_number))
                 else:
                     data_rows += 1
             if not kept_rows:
@@ -135,9 +168,12 @@ def parse_xlsx(data: bytes) -> ParsedDocument:
                     number=number,
                     segments=(
                         Segment(
-                            heading_path=(f"Feuille {sheet.title}",), text="\n".join(kept_rows)
+                            heading_path=(f"Feuille {sheet.title}",),
+                            text="\n".join(kept_rows),
+                            line_indices=tuple(range(len(row_refs))),
                         ),
                     ),
+                    lines=tuple(row_refs),
                 )
             )
         sheet_count = len(workbook.worksheets)

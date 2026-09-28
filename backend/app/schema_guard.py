@@ -61,11 +61,12 @@ def validate_embedding_schema(connection: Connection, settings: Settings) -> Non
             f"(expected {expected_vector_type}, found {vector_type or 'missing'})"
         )
     provider_mismatch_count = connection.execute(
-        _PROVIDER_MISMATCH_SQL, {"provider": settings.rag_provider}
+        _PROVIDER_MISMATCH_SQL, {"provider": settings.embedding_provider}
     ).scalar_one()
     if provider_mismatch_count:
         raise EmbeddingSchemaMismatchError(
             f"{provider_mismatch_count} document(s) have unknown or incompatible embedding "
-            f"providers; re-embed each unchanged PDF with RAG_PROVIDER={settings.rag_provider} "
+            "providers; re-run ingestion with "
+            f"EMBEDDING_PROVIDER={settings.embedding_provider} "
             "before starting retrieval"
         )

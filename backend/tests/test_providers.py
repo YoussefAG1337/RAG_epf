@@ -1,239 +1,252 @@
-"""Tests for direct provider adapters and deterministic offline doubles."""
+"""Tests for the local embeddings client, Gemini answers, and deterministic doubles."""
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import pytest
+from google.genai import errors
 from pydantic import SecretStr
 
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
 )
-from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
-from app.providers.protocols import ProviderConfigurationError
+from app.providers.gemini import GeminiGenerationProvider
+from app.providers.local import EmbeddingServiceError, LocalEmbeddingProvider
+from app.providers.protocols import ProviderConfigurationError, ProviderUnavailableError
 
 
-def test_deterministic_providers_are_repeatable_without_credentials() -> None:
+def test_deterministic_embeddings_are_repeatable_and_reflect_shared_vocabulary() -> None:
     async def verify() -> None:
-        embedder = DeterministicEmbeddingProvider()
-        generator = DeterministicGenerationProvider("controlled answer")
-
-        vector_a = await embedder.embed("same text")
-        vector_b = await embedder.embed("same text")
-        answer_a = await generator.generate("same prompt")
-        answer_b = await generator.generate("same prompt")
-
-        assert vector_a == vector_b
-        assert vector_a != await embedder.embed("unrelated words")
-        assert len(vector_a) == 768
-        assert answer_a == answer_b == "controlled answer"
-
-        grounded = await DeterministicGenerationProvider().generate(
-            'Question:\nA question\n\nEvidence:\n'
-            '[{"citation_id":"chunk-1","excerpt":"A fact from the course."}]'
-        )
-        assert grounded == (
-            '{"claims": [{"text": "A fact from the course.", '
-            '"citation_ids": ["chunk-1"]}]}'
-        )
-
-    asyncio.run(verify())
-
-
-def test_live_gemini_provider_requires_credentials_only_when_invoked() -> None:
-    async def verify() -> None:
-        embedder = GeminiEmbeddingProvider(None)
-        generator = GeminiGenerationProvider(None)
-
-        with pytest.raises(ProviderConfigurationError, match="GEMINI_API_KEY"):
-            await embedder.embed("text")
-        with pytest.raises(ProviderConfigurationError, match="GEMINI_API_KEY"):
-            await generator.generate("prompt")
-
-    asyncio.run(verify())
-
-
-class FakeModels:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, Any]] = []
-
-    async def embed_content(self, *, model: str, contents: str, config: Any) -> Any:
-        self.calls.append(("embed", model, config))
-        item = type("Item", (), {"values": [0.1] * 768})()
-        return type("EmbeddingResponse", (), {"embeddings": [item]})()
-
-    async def generate_content(self, *, model: str, contents: str, config: Any) -> Any:
-        self.calls.append(("generate", model, (contents, config)))
-        return type("GenerationResponse", (), {"text": "direct response"})()
-
-
-class FakeAsyncClient:
-    def __init__(self) -> None:
-        self.models = FakeModels()
-
-
-class FakeClient:
-    def __init__(self) -> None:
-        self.aio = FakeAsyncClient()
-
-
-def test_gemini_adapters_use_direct_async_sdk_methods() -> None:
-    async def verify() -> None:
-        client = FakeClient()
-        embedding = GeminiEmbeddingProvider(
-            SecretStr("test-only"), client=client  # type: ignore[arg-type]
-        )
-        generation = GeminiGenerationProvider(
-            SecretStr("test-only"), client=client  # type: ignore[arg-type]
-        )
-
-        vector = await embedding.embed("course text")
-        answer = await generation.generate("grounded prompt")
-
-        assert len(vector) == 768
-        assert answer == "direct response"
-        assert client.aio.models.calls[0][0:2] == ("embed", "gemini-embedding-2")
-        assert client.aio.models.calls[1][0:2] == ("generate", "gemini-3.8-flash")
-        assert client.aio.models.calls[1][2][1].response_mime_type == "application/json"
-
-    asyncio.run(verify())
-
-
-def test_generation_rejects_empty_text_response() -> None:
-    class EmptyModels(FakeModels):
-        async def generate_content(self, *, model: str, contents: str, config: Any) -> Any:
-            return type("GenerationResponse", (), {"text": "  "})()
-
-    class EmptyClient(FakeClient):
-        def __init__(self) -> None:
-            self.aio = type("AsyncClient", (), {"models": EmptyModels()})()
-
-    async def verify() -> None:
-        provider = GeminiGenerationProvider(
-            SecretStr("test-only"), client=EmptyClient()  # type: ignore[arg-type]
-        )
-        with pytest.raises(RuntimeError, match="no text response"):
-            await provider.generate("prompt")
-
-    asyncio.run(verify())
-
-
-def test_deterministic_embeddings_reflect_shared_vocabulary() -> None:
-    async def verify() -> None:
-        embedder = DeterministicEmbeddingProvider()
+        embedder = DeterministicEmbeddingProvider(dimensions=1024)
 
         def cosine(left: list[float], right: list[float]) -> float:
             return sum(a * b for a, b in zip(left, right, strict=True))
 
-        chunk = await embedder.embed(
-            "Une liste chaînée est composée de nœuds reliés par des pointeurs."
-        )
-        related = await embedder.embed("Qu'est-ce qu'une LISTE CHAINEE ?")
-        unrelated = await embedder.embed("Théorème de Pythagore et triangle rectangle")
-
-        assert abs(cosine(chunk, chunk) - 1.0) < 1e-9
-        assert cosine(chunk, related) > 0.3
-        assert cosine(chunk, unrelated) == 0.0
-        assert await embedder.embed_batch(["liste chaînée"]) == [
-            await embedder.embed("liste chaînée")
-        ]
-        # Stopword-only text still yields a usable unit vector.
-        stopwords_only = await embedder.embed("de la")
-        assert abs(cosine(stopwords_only, stopwords_only) - 1.0) < 1e-9
+        chunk = await embedder.embed("Une liste chaînée est composée de nœuds reliés.")
+        assert chunk == await embedder.embed("Une liste chaînée est composée de nœuds reliés.")
+        assert len(chunk) == 1024
+        assert cosine(chunk, await embedder.embed("Qu'est-ce qu'une LISTE CHAINEE ?")) > 0.3
+        assert cosine(chunk, await embedder.embed("Théorème de Pythagore")) == 0.0
 
     asyncio.run(verify())
 
 
-def test_gemini_batch_sends_each_text_as_its_own_content() -> None:
-    class BatchModels:
-        def __init__(self) -> None:
-            self.contents: Any = None
+def test_deterministic_generation_quotes_the_best_excerpt_and_keeps_questions() -> None:
+    async def verify() -> None:
+        generator = DeterministicGenerationProvider()
+        prompt = (
+            'Question :\nq\n\nExtraits :\n[{"id": "S1", "extrait": "Première ligne.\\nSuite."}]'
+        )
+        assert json.loads(await generator.generate(prompt)) == {
+            "claims": [
+                {
+                    "text": "Première ligne.\nSuite.",
+                    "sources": [{"id": "S1", "quote": "Première ligne."}],
+                }
+            ]
+        }
+        rewrite = "Conversation :\n...\n\nDernière question :\nEt pour AES ?"
+        assert await generator.generate(rewrite, json_output=False) == "Et pour AES ?"
 
-        async def embed_content(self, *, model: str, contents: Any, config: Any) -> Any:
-            self.contents = contents
-            item = type("Item", (), {"values": [0.2] * 768})()
-            return type("EmbeddingResponse", (), {"embeddings": [item] * len(contents)})()
+    asyncio.run(verify())
 
-    models = BatchModels()
+
+def _service(handler: Any) -> LocalEmbeddingProvider:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return LocalEmbeddingProvider(
+        "http://embeddings:8080/", model="BAAI/bge-m3", dimensions=4, client=client
+    )
+
+
+def test_local_provider_encodes_questions_and_passages_differently() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append({"url": str(request.url), **body})
+        vectors = [[0.5, 0.5, 0.5, 0.5] for _ in body["inputs"]]
+        return httpx.Response(
+            200, json={"model": "BAAI/bge-m3", "dimensions": 4, "embeddings": vectors}
+        )
+
+    async def verify() -> None:
+        provider = _service(handler)
+        assert await provider.embed("Comment fonctionne RSA ?") == [0.5] * 4
+        assert len(await provider.embed_batch(["passage 1", "passage 2"])) == 2
+        await provider.aclose()
+
+    asyncio.run(verify())
+    assert [(item["url"], item["kind"]) for item in requests] == [
+        ("http://embeddings:8080/embed", "query"),
+        ("http://embeddings:8080/embed", "document"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            httpx.Response(200, json={"model": "other/model", "embeddings": [[0.1] * 4]}),
+            "runs 'other/model'",
+        ),
+        (
+            httpx.Response(200, json={"model": "BAAI/bge-m3", "embeddings": [[0.1] * 3]}),
+            "wrong shape",
+        ),
+        (httpx.Response(503, json={"detail": "loading"}), "HTTPStatusError"),
+    ],
+)
+def test_local_provider_rejects_wrong_models_shapes_and_failures(
+    response: httpx.Response, message: str
+) -> None:
+    provider = _service(lambda _request: response)
+    with pytest.raises(EmbeddingServiceError, match=message):
+        asyncio.run(provider.embed("question"))
+
+
+def test_local_provider_reports_an_unreachable_service() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    with pytest.raises(EmbeddingServiceError, match="ConnectError"):
+        asyncio.run(_service(refuse).embed("question"))
+
+
+class _Models:
+    def __init__(
+        self, failures: dict[str, int] | None = None, stream: list[str] | None = None
+    ) -> None:
+        self.failures = failures or {}
+        self.stream = stream or ['{"claims":', " []}"]
+        self.calls: list[tuple[str, str, Any]] = []
+
+    async def generate_content(self, *, model: str, contents: str, config: Any) -> Any:
+        self.calls.append(("generate", model, config))
+        if model in self.failures:
+            raise errors.APIError(self.failures[model], {"error": {"message": "busy"}})
+        return type("Response", (), {"text": '{"claims": []}'})()
+
+    async def generate_content_stream(
+        self, *, model: str, contents: str, config: Any
+    ) -> AsyncIterator[Any]:
+        self.calls.append(("stream", model, config))
+        if model in self.failures:
+            raise errors.APIError(self.failures[model], {"error": {"message": "busy"}})
+        pieces = self.stream
+
+        async def iterate() -> AsyncIterator[Any]:
+            for piece in pieces:
+                yield type("Chunk", (), {"text": piece})()
+
+        return iterate()
+
+
+def _gemini(
+    models: _Models, fallbacks: tuple[str, ...] = ("fallback",)
+) -> GeminiGenerationProvider:
     client = type("Client", (), {"aio": type("Aio", (), {"models": models})()})()
-    provider = GeminiEmbeddingProvider(SecretStr("test-only"), client=client)  # type: ignore[arg-type]
+    return GeminiGenerationProvider(
+        SecretStr("test-only"),
+        model="primary",
+        fallback_models=fallbacks,
+        client=client,  # type: ignore[arg-type]
+    )
 
-    vectors = asyncio.run(provider.embed_batch(["premier", "second"]))
 
-    assert len(vectors) == 2
-    # A plain list of strings would be merged into one input by multimodal embedding models.
-    assert [content.parts[0].text for content in models.contents] == ["premier", "second"]
+def test_gemini_requires_credentials_only_when_invoked() -> None:
+    with pytest.raises(ProviderConfigurationError, match="GEMINI_API_KEY"):
+        asyncio.run(GeminiGenerationProvider(None).generate("prompt"))
 
 
-def test_generation_falls_back_when_the_primary_model_is_overloaded() -> None:
-    from google.genai import errors
+def test_gemini_asks_for_json_answers_and_plain_text_rewrites() -> None:
+    models = _Models()
+    provider = _gemini(models)
+    asyncio.run(provider.generate("prompt"))
+    asyncio.run(provider.generate("prompt", json_output=False))
+    assert [call[2].response_mime_type for call in models.calls] == [
+        "application/json",
+        "text/plain",
+    ]
 
-    class OverloadedModels:
-        def __init__(self, failing_code: int) -> None:
-            self.failing_code = failing_code
-            self.models: list[str] = []
 
+def test_gemini_falls_back_when_the_primary_model_is_overloaded() -> None:
+    overloaded = _Models(failures={"primary": 503})
+    assert asyncio.run(_gemini(overloaded).generate("prompt")) == '{"claims": []}'
+    assert [call[1] for call in overloaded.calls] == ["primary", "fallback"]
+
+    rejected = _Models(failures={"primary": 400})  # a bad request is not retried elsewhere
+    with pytest.raises(errors.APIError):
+        asyncio.run(_gemini(rejected).generate("prompt"))
+    assert [call[1] for call in rejected.calls] == ["primary"]
+
+
+def test_gemini_reports_unavailable_when_every_model_is_busy() -> None:
+    async def collect(provider: GeminiGenerationProvider) -> str:
+        return "".join([piece async for piece in provider.generate_stream("prompt")])
+
+    busy = _Models(failures={"primary": 503, "fallback": 429})
+    with pytest.raises(ProviderUnavailableError, match="last: 429"):
+        asyncio.run(_gemini(busy).generate("prompt"))
+    with pytest.raises(ProviderUnavailableError):
+        asyncio.run(collect(_gemini(busy)))
+
+
+def test_gemini_streams_and_falls_back_before_the_first_chunk() -> None:
+    async def collect(provider: GeminiGenerationProvider) -> str:
+        return "".join([piece async for piece in provider.generate_stream("prompt")])
+
+    models = _Models(failures={"primary": 429}, stream=['{"claims"', ": []}"])
+    assert asyncio.run(collect(_gemini(models))) == '{"claims": []}'
+    assert [call[:2] for call in models.calls] == [("stream", "primary"), ("stream", "fallback")]
+
+
+def test_gemini_rejects_empty_responses() -> None:
+    class Empty(_Models):
         async def generate_content(self, *, model: str, contents: str, config: Any) -> Any:
-            self.models.append(model)
-            if model == "primary":
-                raise errors.APIError(self.failing_code, {"error": {"message": "busy"}})
-            return type("GenerationResponse", (), {"text": '{"claims": []}'})()
+            return type("Response", (), {"text": "  "})()
 
-    def provider(models: OverloadedModels) -> GeminiGenerationProvider:
-        client = type("Client", (), {"aio": type("Aio", (), {"models": models})()})()
-        return GeminiGenerationProvider(
-            SecretStr("test-only"),
-            model="primary",
-            fallback_models=("fallback",),
-            client=client,  # type: ignore[arg-type]
-        )
-
-    overloaded = OverloadedModels(503)
-    assert asyncio.run(provider(overloaded).generate("prompt")) == '{"claims": []}'
-    assert overloaded.models == ["primary", "fallback"]
-
-    # A request error (bad prompt, bad key) is not retried on another model.
-    rejected = OverloadedModels(400)
-    with pytest.raises(errors.APIError):
-        asyncio.run(provider(rejected).generate("prompt"))
-    assert rejected.models == ["primary"]
+    with pytest.raises(RuntimeError, match="no text response"):
+        asyncio.run(_gemini(Empty()).generate("prompt"))
 
 
-def test_ingestion_embeddings_wait_out_the_per_minute_quota(monkeypatch) -> None:
-    from google.genai import errors
+def test_gemini_moves_on_when_a_model_stops_responding() -> None:
+    class Stalling(_Models):
+        async def generate_content_stream(
+            self, *, model: str, contents: str, config: Any
+        ) -> AsyncIterator[Any]:
+            self.calls.append(("stream", model, config))
 
-    from app.providers import gemini
+            async def iterate() -> AsyncIterator[Any]:
+                if model == "primary":
+                    await asyncio.sleep(10)  # accepted, then never answers
+                yield type("Chunk", (), {"text": '{"claims": []}'})()
 
-    waits: list[float] = []
+            return iterate()
 
-    async def fake_sleep(seconds: float) -> None:
-        waits.append(seconds)
+    async def collect(provider: GeminiGenerationProvider) -> str:
+        return "".join([piece async for piece in provider.generate_stream("prompt")])
 
-    monkeypatch.setattr(gemini.asyncio, "sleep", fake_sleep)
-    quota = {"error": {"code": 429, "details": [{"retryDelay": "33s"}]}}
+    models = Stalling()
+    client = type("Client", (), {"aio": type("Aio", (), {"models": models})()})()
+    provider = GeminiGenerationProvider(
+        SecretStr("test-only"),
+        model="primary",
+        fallback_models=("fallback",),
+        client=client,  # type: ignore[arg-type]
+        stall_timeout=0.05,
+    )
+    assert asyncio.run(collect(provider)) == '{"claims": []}'
+    assert [call[1] for call in models.calls] == ["primary", "fallback"]
 
-    class LimitedModels:
-        def __init__(self, failures: int) -> None:
-            self.failures = failures
-
-        async def embed_content(self, *, model: str, contents: Any, config: Any) -> Any:
-            if self.failures:
-                self.failures -= 1
-                raise errors.APIError(429, quota)
-            item = type("Item", (), {"values": [0.3] * 768})()
-            return type("EmbeddingResponse", (), {"embeddings": [item] * len(contents)})()
-
-    def provider(failures: int, retries: int) -> GeminiEmbeddingProvider:
-        aio = type("Aio", (), {"models": LimitedModels(failures)})()
-        client = type("Client", (), {"aio": aio})()
-        return GeminiEmbeddingProvider(
-            SecretStr("test-only"), rate_limit_retries=retries, client=client  # type: ignore[arg-type]
-        )
-
-    assert len(asyncio.run(provider(failures=2, retries=5).embed_batch(["a", "b"]))) == 2
-    assert waits == [34.0, 34.0]
-
-    # Answering a question does not retry: it fails fast instead of hanging.
-    with pytest.raises(errors.APIError):
-        asyncio.run(provider(failures=1, retries=0).embed_batch(["a"]))
+    only = GeminiGenerationProvider(
+        SecretStr("test-only"),
+        model="primary",
+        client=type("Client", (), {"aio": type("Aio", (), {"models": Stalling()})()})(),  # type: ignore[arg-type]
+        stall_timeout=0.05,
+    )
+    with pytest.raises(ProviderUnavailableError, match="stopped responding"):
+        asyncio.run(collect(only))

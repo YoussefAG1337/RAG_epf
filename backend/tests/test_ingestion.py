@@ -17,6 +17,7 @@ from pypdf import PdfWriter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import EMBEDDING_DIMENSIONS
 from app.ingestion import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
@@ -282,7 +283,7 @@ def test_ingest_extracts_text_pages_and_keeps_provenance(tmp_path: Path) -> None
     assert {chunk.physical_page_number for chunk in database.chunks} == {1, 3}
     assert [chunk.chunk_position for chunk in database.chunks] == list(range(result.chunk_count))
     assert database.documents[0].checksum == result.checksum
-    assert all(len(chunk.embedding) == 768 for chunk in database.chunks)
+    assert all(len(chunk.embedding) == EMBEDDING_DIMENSIONS for chunk in database.chunks)
     assert all(chunk.course_id == "course-a" for chunk in database.chunks)
 
 
@@ -330,7 +331,7 @@ def test_same_checksum_is_reembedded_when_provider_changes(tmp_path: Path) -> No
         provider_id = "gemini"
 
         async def embed(self, _text: str) -> list[float]:
-            return [0.25] * 768
+            return [0.25] * EMBEDDING_DIMENSIONS
 
     result = asyncio.run(
         _run_ingestion(source, "lesson.pdf", "course-a", database, provider=GeminiLikeProvider())
@@ -341,7 +342,7 @@ def test_same_checksum_is_reembedded_when_provider_changes(tmp_path: Path) -> No
     assert database.documents[0].embedding_provider == "gemini"
     assert [chunk.text for chunk in database.chunks] == old_chunk_text
     assert [chunk.id for chunk in database.chunks] == old_chunk_ids
-    assert all(chunk.embedding == [0.25] * 768 for chunk in database.chunks)
+    assert all(chunk.embedding == [0.25] * EMBEDDING_DIMENSIONS for chunk in database.chunks)
 
 
 def test_legacy_null_provider_is_reembedded_with_gemini_marker(tmp_path: Path) -> None:
@@ -357,7 +358,7 @@ def test_legacy_null_provider_is_reembedded_with_gemini_marker(tmp_path: Path) -
         provider_id = "gemini"
 
         async def embed(self, _text: str) -> list[float]:
-            return [0.5] * 768
+            return [0.5] * EMBEDDING_DIMENSIONS
 
     asyncio.run(
         _run_ingestion(source, "lesson.pdf", "course-a", database, provider=GeminiLikeProvider())
@@ -365,7 +366,7 @@ def test_legacy_null_provider_is_reembedded_with_gemini_marker(tmp_path: Path) -
 
     assert database.documents[0].embedding_provider == "gemini"
     assert [chunk.id for chunk in database.chunks] == old_ids
-    assert all(chunk.embedding == [0.5] * 768 for chunk in database.chunks)
+    assert all(chunk.embedding == [0.5] * EMBEDDING_DIMENSIONS for chunk in database.chunks)
 
 
 def test_legacy_null_provider_failure_preserves_vectors_and_marker(tmp_path: Path) -> None:
@@ -415,7 +416,7 @@ def test_provider_change_refuses_chunk_count_or_identity_mismatch(
         provider_id = "gemini"
 
         async def embed(self, _text: str) -> list[float]:
-            return [0.75] * 768
+            return [0.75] * EMBEDDING_DIMENSIONS
 
     with pytest.raises(IngestionError, match="chunks do not match"):
         asyncio.run(
@@ -449,7 +450,7 @@ def test_failed_provider_change_transaction_preserves_existing_vectors(tmp_path:
         provider_id = "gemini"
 
         async def embed(self, _text: str) -> list[float]:
-            return [0.25] * 768
+            return [0.25] * EMBEDDING_DIMENSIONS
 
     with pytest.raises(IngestionError, match="transaction was rolled back"):
         asyncio.run(
@@ -557,7 +558,10 @@ def test_embedding_or_persistence_failure_leaves_no_committed_rows(tmp_path: Pat
 
 @pytest.mark.parametrize(
     ("vector", "message"),
-    [([0.0, 1.0], "expected 768"), ([float("nan")] * 768, "non-finite")],
+    [
+        ([0.0, 1.0], f"expected {EMBEDDING_DIMENSIONS}"),
+        ([float("nan")] * EMBEDDING_DIMENSIONS, "non-finite"),
+    ],
 )
 def test_invalid_embedding_vectors_are_rejected_before_transaction(
     tmp_path: Path, vector: list[float], message: str
@@ -633,7 +637,7 @@ def test_batch_capable_provider_is_called_in_bounded_batches(tmp_path: Path) -> 
 
         async def embed_batch(self, texts: list[str]) -> list[list[float]]:
             batch_sizes.append(len(texts))
-            return [[0.5] * 768 for _ in texts]
+            return [[0.5] * EMBEDDING_DIMENSIONS for _ in texts]
 
     database = _FakeSessionFactory()
     result = asyncio.run(

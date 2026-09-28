@@ -1,43 +1,82 @@
-"""FastAPI application and initial readiness contract."""
+"""FastAPI application: course library, document viewer data, conversations, answers."""
 
 import logging
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
-from typing import Literal, cast
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any, Literal, cast
+from uuid import UUID
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, StrictStr
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.answering import (
+    AnswerEvent,
+    AnswerServiceBusyError,
+    Citation,
+    Claim,
     CourseSummary,
+    DocumentSummary,
     NoEvidenceError,
+    Scope,
     UnsupportedQuestionError,
-    answer_question,
+    answer_events,
     list_courses,
+    list_documents,
 )
 from app.config import Settings, get_settings
+from app.conversations import (
+    ConversationDetail,
+    ConversationSummary,
+    append_messages,
+    delete_conversation,
+    get_conversation,
+    list_conversations,
+    rename_conversation,
+    start_or_continue,
+)
 from app.db import create_database_engine, create_session_factory
+from app.documents import (
+    DocumentContent,
+    DocumentInfo,
+    DocumentMissingError,
+    document_content,
+    document_path,
+    get_document,
+    media_type,
+)
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
 )
-from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
+from app.providers.gemini import GeminiGenerationProvider
+from app.providers.local import LocalEmbeddingProvider
 from app.providers.protocols import EmbeddingProvider, GenerationProvider
 from app.schema_guard import validate_embedding_schema
 from app.stream_contract import (
     AbstentionEvent,
-    CitationItem,
     CitationsEvent,
+    ClaimEvent,
     CompletedEvent,
-    DeltaEvent,
+    ConversationEvent,
     ErrorEvent,
+    StatusEvent,
 )
 
 logger = logging.getLogger(__name__)
+
+ERROR_MESSAGE = "La réponse n'a pas pu être générée. Réessayez dans un instant."
+BUSY_MESSAGE = (
+    "Le service de rédaction des réponses est saturé (limite de l'offre gratuite Gemini). "
+    "Réessayez dans une minute."
+)
+ABSTENTION_MESSAGE = (
+    "Je n'ai pas trouvé cette information dans les supports de cours. Reformulez la "
+    "question ou choisissez un autre cours ou document."
+)
 
 
 class ReadinessResponse(BaseModel):
@@ -47,41 +86,38 @@ class ReadinessResponse(BaseModel):
     service: Literal["course-rag-api"] = "course-rag-api"
 
 
-class StreamRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", strict=True)
-    # Omitted or null scopes search every course; a string must name one subject/course.
+class ScopeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
     subject: StrictStr | None = None
     course_id: StrictStr | None = None
-    question: StrictStr | None = None
+    document_id: UUID | None = Field(default=None, strict=False)
+
+
+class AnswerRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    question: StrictStr
+    conversation_id: UUID | None = Field(default=None, strict=False)
+    scope: ScopeRequest = Field(default_factory=ScopeRequest)
 
 
 class CoursesResponse(BaseModel):
-    """Courses that currently have ingested material."""
-
     courses: list[CourseSummary]
 
 
-_ERROR_MESSAGE = "The answer could not be generated. Check the course and question, then try again."
-_ABSTENTION_MESSAGE = (
-    "I couldn't find this in the course material. Try rephrasing the question "
-    "or choosing a different course."
-)
+class DocumentsResponse(BaseModel):
+    documents: list[DocumentSummary]
 
 
-def _delta_chunks(text: str, maximum_length: int = 80) -> list[str]:
-    """Split validated claim text into nonempty word-aware pieces without loss."""
+class ConversationsResponse(BaseModel):
+    conversations: list[ConversationSummary]
 
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + maximum_length, len(text))
-        if end < len(text):
-            boundary = text.rfind(" ", start, end)
-            if boundary > start:
-                end = boundary
-        chunks.append(text[start:end])
-        start = end
-    return chunks
+
+class RenameRequest(BaseModel):
+    title: StrictStr
+
+
+def _line(event: BaseModel) -> str:
+    return event.model_dump_json() + "\n"
 
 
 def create_app(
@@ -93,42 +129,47 @@ def create_app(
     generation_provider: GenerationProvider | None = None,
     settings_factory: Callable[[], Settings] = get_settings,
 ) -> FastAPI:
-    """Build the API application with an injectable startup schema check."""
+    """Build the API with injectable storage, providers, and startup schema check."""
 
-    @asynccontextmanager
-    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        settings = settings_factory()
-        live_providers: list[object] = []
-        try:
-            if settings.rag_provider == "gemini":
-                configured_embedding = embedding_provider or GeminiEmbeddingProvider(
-                    settings.gemini_api_key,
+    shared: dict[str, Any] = {}
+
+    def sessions() -> sessionmaker[Session]:
+        """One engine (connection pool) for the whole process."""
+
+        if session_factory is not None:
+            return session_factory
+        if "sessions" not in shared:
+            shared["engine"] = engine_factory(settings_factory())
+            shared["sessions"] = create_session_factory(shared["engine"])
+        return cast(sessionmaker[Session], shared["sessions"])
+
+    def providers(settings: Settings) -> tuple[EmbeddingProvider, GenerationProvider]:
+        if "embedding" not in shared:
+            shared["embedding"] = embedding_provider or (
+                LocalEmbeddingProvider(
+                    settings.embedding_url,
                     model=settings.embedding_model,
                     dimensions=settings.embedding_dimensions,
                 )
-                configured_generation = (
-                    generation_provider
-                    or GeminiGenerationProvider(
-                        settings.gemini_api_key,
-                        model=settings.answer_model,
-                        fallback_models=settings.fallback_answer_models,
-                    )
+                if settings.embedding_provider == "local"
+                else DeterministicEmbeddingProvider(settings.embedding_dimensions)
+            )
+            shared["generation"] = generation_provider or (
+                GeminiGenerationProvider(
+                    settings.gemini_api_key,
+                    model=settings.answer_model,
+                    fallback_models=settings.fallback_answer_models,
                 )
-                # Validate credentials at startup without making a provider request.
-                if (
-                    settings.gemini_api_key is None
-                    or not settings.gemini_api_key.get_secret_value()
-                ):
-                    raise ValueError("GEMINI_API_KEY is required when RAG_PROVIDER=gemini")
-                if embedding_provider is None:
-                    live_providers.append(configured_embedding)
-                if generation_provider is None:
-                    live_providers.append(configured_generation)
-                application.state.embedding_provider = configured_embedding
-                application.state.generation_provider = configured_generation
-            else:
-                application.state.embedding_provider = embedding_provider
-                application.state.generation_provider = generation_provider
+                if settings.answer_provider == "gemini"
+                else DeterministicGenerationProvider()
+            )
+        return shared["embedding"], shared["generation"]
+
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncGenerator[None]:
+        settings = settings_factory()
+        try:
+            providers(settings)
             if schema_guard is not None:
                 engine = engine_factory(settings)
                 try:
@@ -138,103 +179,232 @@ def create_app(
                     engine.dispose()
             yield
         finally:
-            for provider in live_providers:
-                close = getattr(provider, "close", None)
+            generation = shared.get("generation")
+            if generation is not None and generation_provider is None:
+                close = getattr(generation, "close", None)
                 if close is not None:
                     close()
+            embedding = shared.get("embedding")
+            if embedding is not None and embedding_provider is None:
+                aclose = getattr(embedding, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            if "engine" in shared:
+                shared["engine"].dispose()
+            shared.clear()
 
-    application = FastAPI(title="Local Course RAG API", version="0.1.0", lifespan=lifespan)
+    application = FastAPI(title="Course RAG API", version="0.2.0", lifespan=lifespan)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=get_settings().frontend_origins,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],
     )
-
-    @contextmanager
-    def session_scope(settings: Settings) -> Iterator[sessionmaker[Session]]:
-        """Yield the injected session factory, or one backed by a request-owned engine."""
-
-        if session_factory is not None:
-            yield session_factory
-            return
-        owned_engine = engine_factory(settings)
-        try:
-            yield create_session_factory(owned_engine)
-        finally:
-            owned_engine.dispose()
 
     @application.get("/api/v1/readiness", response_model=ReadinessResponse, tags=["system"])
     def readiness() -> ReadinessResponse:
         return ReadinessResponse()
 
-    @application.get("/api/v1/courses", response_model=CoursesResponse, tags=["courses"])
+    @application.get("/api/v1/courses", response_model=CoursesResponse, tags=["library"])
     def courses() -> CoursesResponse:
-        with session_scope(settings_factory()) as factory:
-            return CoursesResponse(courses=list_courses(factory))
+        return CoursesResponse(courses=list_courses(sessions()))
+
+    @application.get("/api/v1/documents", response_model=DocumentsResponse, tags=["library"])
+    def documents(course_id: str | None = Query(default=None)) -> DocumentsResponse:
+        return DocumentsResponse(documents=list_documents(sessions(), course_id))
+
+    def _document(document_id: UUID) -> DocumentInfo:
+        try:
+            return get_document(sessions(), document_id)
+        except DocumentMissingError as error:
+            raise HTTPException(status_code=404, detail="Document introuvable.") from error
+
+    @application.get(
+        "/api/v1/documents/{document_id}", response_model=DocumentInfo, tags=["library"]
+    )
+    def document(document_id: UUID) -> DocumentInfo:
+        return _document(document_id)
+
+    @application.get("/api/v1/documents/{document_id}/file", tags=["library"])
+    def document_file(document_id: UUID) -> FileResponse:
+        info = _document(document_id)
+        try:
+            path = document_path(settings_factory().pdf_source_dir, info)
+        except DocumentMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return FileResponse(
+            path,
+            media_type=media_type(info.kind),
+            filename=path.name,
+            content_disposition_type="inline",
+        )
+
+    @application.get(
+        "/api/v1/documents/{document_id}/content",
+        response_model=DocumentContent,
+        tags=["library"],
+    )
+    def content(document_id: UUID) -> DocumentContent:
+        info = _document(document_id)
+        try:
+            path = document_path(settings_factory().pdf_source_dir, info)
+        except DocumentMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return document_content(path, info.kind)
+
+    @application.get(
+        "/api/v1/conversations", response_model=ConversationsResponse, tags=["conversations"]
+    )
+    def conversations() -> ConversationsResponse:
+        return ConversationsResponse(conversations=list_conversations(sessions()))
+
+    @application.get(
+        "/api/v1/conversations/{conversation_id}",
+        response_model=ConversationDetail,
+        tags=["conversations"],
+    )
+    def conversation(conversation_id: UUID) -> ConversationDetail:
+        detail = get_conversation(sessions(), conversation_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Conversation introuvable.")
+        return detail
+
+    @application.patch(
+        "/api/v1/conversations/{conversation_id}",
+        response_model=ConversationSummary,
+        tags=["conversations"],
+    )
+    def rename(conversation_id: UUID, request: RenameRequest) -> ConversationSummary:
+        try:
+            summary = rename_conversation(sessions(), conversation_id, request.title)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Titre vide.") from error
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Conversation introuvable.")
+        return summary
+
+    @application.delete(
+        "/api/v1/conversations/{conversation_id}", status_code=204, tags=["conversations"]
+    )
+    def remove(conversation_id: UUID) -> None:
+        if not delete_conversation(sessions(), conversation_id):
+            raise HTTPException(status_code=404, detail="Conversation introuvable.")
 
     @application.post("/api/v1/answers/stream", tags=["answers"])
-    async def stream_answer(request: StreamRequest) -> StreamingResponse:
+    async def stream_answer(request: AnswerRequest) -> StreamingResponse:
         async def events() -> AsyncIterator[str]:
-            terminal = False
+            question = request.question.strip()
+            if not question or len(question) > 2000:
+                yield _line(ErrorEvent(message="Posez une question (2000 caractères maximum)."))
+                return
+            settings = settings_factory()
+            factory = sessions()
+            scope = Scope(
+                subject=request.scope.subject,
+                course_id=request.scope.course_id,
+                document_id=request.scope.document_id,
+            )
             try:
-                settings = settings_factory()
-                if (
-                    (request.course_id is not None and not request.course_id.strip())
-                    or (request.subject is not None and not request.subject.strip())
-                    or not request.question
-                    or not request.question.strip()
+                conversation_id, history = start_or_continue(
+                    factory, request.conversation_id, question, scope.as_json()
+                )
+            except Exception:
+                logger.exception("could not open the conversation")
+                yield _line(ErrorEvent(message=ERROR_MESSAGE))
+                return
+            yield _line(ConversationEvent(conversation_id=str(conversation_id)))
+            yield _line(StatusEvent(stage="searching"))
+
+            claims: list[Claim] = []
+            citations: list[Citation] = []
+            retrieval_query = question
+            status: Literal["answered", "abstained", "error"] = "answered"
+            error_message = ERROR_MESSAGE
+            embedding, generation = providers(settings)
+            try:
+                async for event in answer_events(
+                    question=question,
+                    scope=scope,
+                    history=history,
+                    session_factory=factory,
+                    embedding_provider=embedding,
+                    generation_provider=generation,
+                    settings=settings,
                 ):
-                    yield ErrorEvent(message=_ERROR_MESSAGE).model_dump_json() + "\n"
-                    terminal = True
-                    return
-                selected_embedding_provider = cast(
-                    EmbeddingProvider,
-                    embedding_provider
-                    or getattr(application.state, "embedding_provider", None)
-                    or DeterministicEmbeddingProvider(settings.embedding_dimensions),
-                )
-                selected_generation_provider = cast(
-                    GenerationProvider,
-                    generation_provider
-                    or getattr(application.state, "generation_provider", None)
-                    or DeterministicGenerationProvider(),
-                )
-                try:
-                    with session_scope(settings) as factory:
-                        answer = await answer_question(
-                            question=request.question,
-                            course_id=request.course_id,
-                            subject=request.subject,
-                            session_factory=factory,
-                            embedding_provider=selected_embedding_provider,
-                            generation_provider=selected_generation_provider,
-                            settings=settings,
-                        )
-                except (NoEvidenceError, UnsupportedQuestionError):
-                    yield AbstentionEvent(message=_ABSTENTION_MESSAGE).model_dump_json() + "\n"
-                    terminal = True
-                    return
-                for claim_index, claim in enumerate(answer.claims):
-                    if claim_index:
-                        yield DeltaEvent(text=" ").model_dump_json() + "\n"
-                    for chunk in _delta_chunks(claim.text):
-                        yield DeltaEvent(text=chunk).model_dump_json() + "\n"
-                citations = [
-                    CitationItem(**citation.model_dump()) for citation in answer.citations
-                ]
-                yield CitationsEvent(citations=citations).model_dump_json() + "\n"
-                yield CompletedEvent().model_dump_json() + "\n"
-                terminal = True
+                    line = _event_line(event, len(claims), question)
+                    if event.kind == "retrieved" and event.retrieval_query:
+                        retrieval_query = event.retrieval_query
+                    elif event.kind == "claim" and event.claim is not None:
+                        claims.append(event.claim)
+                    elif event.kind == "citations" and event.citations is not None:
+                        citations = event.citations
+                    if line:
+                        yield line
+            except (NoEvidenceError, UnsupportedQuestionError):
+                status = "abstained"
+            except AnswerServiceBusyError:
+                logger.warning("answer models are overloaded or rate limited")
+                status, error_message = "error", BUSY_MESSAGE
             except Exception:
                 # The client only sees the safe message; the server log keeps the cause.
                 logger.exception("answer stream failed")
-                if not terminal:
-                    yield ErrorEvent(message=_ERROR_MESSAGE).model_dump_json() + "\n"
+                status = "error"
+
+            if status == "answered" and not citations:
+                status = "error"
+            answer_text = (
+                " ".join(claim.text for claim in claims)
+                if status == "answered"
+                else ABSTENTION_MESSAGE
+                if status == "abstained"
+                else error_message
+            )
+            payload: dict[str, Any] = {
+                "status": status,
+                "claims": [claim.model_dump() for claim in claims] if status == "answered" else [],
+                "citations": [citation.model_dump() for citation in citations]
+                if status == "answered"
+                else [],
+                "retrieval_query": retrieval_query,
+                "scope": scope.as_json(),
+            }
+            message_id: str | None = None
+            try:
+                ids = append_messages(
+                    factory,
+                    conversation_id,
+                    [
+                        ("user", question, {"scope": scope.as_json()}),
+                        ("assistant", answer_text, payload),
+                    ],
+                )
+                message_id = str(ids[-1])
+            except Exception:
+                logger.exception("could not save the conversation messages")
+
+            if status == "abstained":
+                yield _line(AbstentionEvent(message=ABSTENTION_MESSAGE))
+            elif status == "error":
+                yield _line(ErrorEvent(message=error_message))
+            else:
+                yield _line(CompletedEvent(message_id=message_id))
 
         return StreamingResponse(events(), media_type="application/x-ndjson")
 
     return application
+
+
+def _event_line(event: AnswerEvent, claim_count: int, question: str) -> str | None:
+    if event.kind == "retrieved":
+        rewritten = event.retrieval_query if event.retrieval_query != question else None
+        return _line(StatusEvent(stage="writing", retrieval_query=rewritten))
+    if event.kind == "claim" and event.claim is not None:
+        return _line(
+            ClaimEvent(index=claim_count, text=event.claim.text, citations=event.claim.citations)
+        )
+    if event.kind == "citations" and event.citations is not None:
+        return _line(CitationsEvent(citations=event.citations))
+    return None
 
 
 app = create_app()

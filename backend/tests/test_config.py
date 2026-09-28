@@ -8,7 +8,7 @@ from pydantic_settings import SettingsConfigDict
 from pytest import MonkeyPatch
 from sqlalchemy.engine import make_url
 
-from app.config import Settings
+from app.config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, LOCAL_MINIMUM_SCORE, Settings
 
 
 class IsolatedSettings(Settings):
@@ -21,8 +21,12 @@ def test_settings_have_offline_defaults(monkeypatch: MonkeyPatch) -> None:
     settings = IsolatedSettings()
 
     assert settings.answer_model == "gemini-3.8-flash"
-    assert settings.embedding_model == "gemini-embedding-2"
-    assert settings.embedding_dimensions == 768
+    assert settings.embedding_model == EMBEDDING_MODEL
+    assert settings.embedding_dimensions == EMBEDDING_DIMENSIONS
+    assert (settings.embedding_provider, settings.answer_provider) == (
+        "deterministic",
+        "deterministic",
+    )
     assert settings.pdf_source_dir == Path("data/course-pdfs")
     assert settings.gemini_api_key is None
 
@@ -46,11 +50,9 @@ def test_database_url_encodes_reserved_password_characters() -> None:
     assert "pa%40ss%3A%2F%3F%23%25" in settings.database_url
 
 
-def test_embedding_model_and_dimensions_are_locked_to_schema_contract() -> None:
+def test_embedding_dimensions_are_locked_to_the_migrated_vector_column() -> None:
     import pytest
 
-    with pytest.raises(ValidationError, match="embedding_model"):
-        IsolatedSettings(embedding_model="other-model")
     with pytest.raises(ValidationError, match="embedding_dimensions"):
         IsolatedSettings(embedding_dimensions=384)
 
@@ -68,17 +70,16 @@ def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("RAG_PROVIDER", raising=False)
     with pytest.raises(ValidationError, match="GEMINI_API_KEY"):
-        IsolatedSettings(rag_provider="gemini")
-    assert IsolatedSettings(rag_provider="deterministic").rag_provider == "deterministic"
+        IsolatedSettings(answer_provider="gemini")
+    with pytest.raises(ValidationError, match="embedding_provider"):
+        IsolatedSettings(embedding_provider="gemini")  # type: ignore[arg-type]
+    assert IsolatedSettings(answer_provider="deterministic").answer_provider == "deterministic"
 
 
 def test_minimum_score_defaults_by_provider_unless_configured() -> None:
     assert IsolatedSettings().minimum_score == 0.1
-    assert IsolatedSettings(
-        rag_provider="gemini", gemini_api_key=SecretStr("key")
-    ).minimum_score == 0.6
+    assert IsolatedSettings(embedding_provider="local").minimum_score == LOCAL_MINIMUM_SCORE
     assert IsolatedSettings(evidence_minimum_score=0.5).minimum_score == 0.5
 
 

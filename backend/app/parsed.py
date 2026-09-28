@@ -6,6 +6,16 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class LineRef:
+    """One source line: a PDF text line (normalized box), a text-file line, or a sheet row."""
+
+    text: str
+    page: int
+    box: tuple[float, float, float, float] | None = None  # x0, y0, x1, y1 as page fractions
+    line: int | None = None  # 1-based line (text files) or row (spreadsheets)
+
+
+@dataclass(frozen=True)
 class Segment:
     """A run of text under one heading.
 
@@ -16,6 +26,8 @@ class Segment:
 
     heading_path: tuple[str, ...]
     text: str
+    # Indices into the page's ``lines`` that this segment was built from.
+    line_indices: tuple[int, ...] = ()
 
     @property
     def heading(self) -> str | None:
@@ -33,6 +45,8 @@ class ParsedPage:
     # Share of the page covered by images; a title-only "slide" that is mostly a picture
     # (a diagram) is content, not a section divider.
     image_share: float = 0.0
+    # Source lines of the page, used to locate chunks in the original file.
+    lines: tuple[LineRef, ...] = ()
 
     @property
     def title(self) -> str | None:

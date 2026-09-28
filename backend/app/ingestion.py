@@ -13,12 +13,15 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import EMBEDDING_DIMENSIONS
+from app.locating import locate_lines
 from app.models import Document, DocumentChunk
 from app.parsed import ParsedDocument, ParsedPage
 from app.pdf_parsing import EncryptedPdfError, PdfParsingError, parse_pdf
@@ -27,12 +30,12 @@ from app.text_parsing import TextParsingError, parse_markdown, parse_xlsx
 
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 150
-EXPECTED_EMBEDDING_DIMENSIONS = 768
+EXPECTED_EMBEDDING_DIMENSIONS = EMBEDDING_DIMENSIONS
 # Gemini's free tier allows 100 embedded texts per minute; small batches let ingestion wait
 # out the quota window in steps instead of failing on one oversized request.
 EMBEDDING_BATCH_SIZE = 25
 # Bump when parsing or chunking changes so re-ingestion rebuilds existing documents.
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 SUPPORTED_SUFFIXES = frozenset({".pdf", ".md", ".markdown", ".txt", ".xlsx"})
 # Subject given to course folders placed directly beneath the source directory.
 DEFAULT_SUBJECT = "Général"
@@ -88,6 +91,8 @@ class _ChunkDraft:
     chunk_position: int
     section_title: str | None
     text: str
+    # Where the chunk's lines are in the source file (see locating.locate_lines).
+    locations: tuple[dict[str, Any], ...] = ()
 
 
 def _validate_name(value: str, label: str) -> str:
@@ -420,6 +425,7 @@ def _draft_chunks(parsed: ParsedDocument) -> list[_ChunkDraft]:
             parts: list[str] = [section] if section else []
             parts.extend(part for part in current_path if part not in parts)
             heading = " > ".join(parts) or None
+            source_lines = [page.lines[index] for index in segment.line_indices]
             for chunk in chunk_lines(text):
                 drafts.append(
                     _ChunkDraft(
@@ -427,6 +433,7 @@ def _draft_chunks(parsed: ParsedDocument) -> list[_ChunkDraft]:
                         chunk_position=len(drafts),
                         section_title=heading,
                         text=chunk,
+                        locations=tuple(locate_lines(chunk, source_lines)),
                     )
                 )
     return drafts
@@ -609,6 +616,7 @@ async def ingest_document(
             chunk_position=draft.chunk_position,
             section_title=draft.section_title,
             text=draft.text,
+            locations=list(draft.locations),
             embedding=vector,
         )
         for draft, vector in zip(drafts, vectors, strict=True)

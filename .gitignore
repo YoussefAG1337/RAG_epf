@@ -18,6 +18,12 @@ node_modules/
 coverage/
 *.tsbuildinfo
 
+# Local processes started by start.sh
+.run/
+
+# Browser end-to-end screenshots (they show course material)
+frontend/e2e/screenshots/
+
 # Local course content (teachers' material: never commit)
 data/
 cours/

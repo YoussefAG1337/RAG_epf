@@ -1,32 +1,43 @@
-:root {
-  color-scheme: light;
-  font-family: Arial, Helvetica, sans-serif;
-  background: #f3f6f8;
-  color: #17232e;
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #dbe6ff;
+  --color-brand-500: #3d63dd;
+  --color-brand-600: #2f4fc4;
+  --color-brand-700: #263f9e;
+  --color-brand-900: #1a2a66;
+  --color-mark: #fde68a;
 }
 
-* { box-sizing: border-box; }
-body { margin: 0; }
-.page { min-height: 100vh; display: grid; place-items: center; padding: 2rem; }
-.card { width: min(100%, 36rem); padding: 2.5rem; border: 1px solid #dce4e9; border-radius: 1rem; background: white; box-shadow: 0 1rem 3rem #17232e12; }
-.eyebrow { margin: 0 0 .75rem; color: #557080; font-size: .8rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
-h1 { margin: 0; font-size: clamp(2rem, 7vw, 3rem); }
-.intro { color: #52616d; line-height: 1.6; }
-.status { display: flex; align-items: center; gap: .65rem; margin: 2rem 0 0; font-weight: 700; }
-.status-dot { width: .65rem; height: .65rem; border-radius: 50%; background: #8a969e; }
-.status-ready .status-dot { background: #16804a; }
-.status-unavailable .status-dot { background: #bd4338; }
-.chat-form { display: grid; gap: .6rem; margin-top: 1.5rem; }
-.chat-form label { font-weight: 700; font-size: .9rem; }
-.chat-form input, .chat-form textarea, .chat-form select { width: 100%; padding: .75rem; border: 1px solid #bdcbd3; border-radius: .45rem; font: inherit; }
-.chat-form button { justify-self: start; padding: .7rem 1.2rem; border: 0; border-radius: .45rem; background: #175b75; color: white; font: inherit; font-weight: 700; cursor: pointer; }
-.chat-form button:disabled { opacity: .55; cursor: wait; }
-.chat-status { min-height: 1.5rem; color: #52616d; }
-.answer-text { white-space: pre-wrap; line-height: 1.6; }
-.citation-list { padding-left: 1.2rem; }
-.citation-list li { margin: 1rem 0; }
-blockquote { margin: .5rem 0; padding: .75rem; border-left: 3px solid #8eabb8; background: #f3f6f8; line-height: 1.5; }
-.field-hint { margin: 0; color: #52616d; font-size: .85rem; }
-.chat-notice { padding: .75rem; border-left: 3px solid #c08a1e; background: #fdf6e7; color: #5c4510; line-height: 1.5; }
-.citation-course { color: #557080; }
-.citation-section { display: block; color: #557080; font-size: .85rem; }
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+/* Highlight boxes drawn over PDF pages and text blocks. */
+.citation-mark {
+  background: color-mix(in srgb, var(--color-mark) 55%, transparent);
+  outline: 2px solid color-mix(in srgb, #f59e0b 70%, transparent);
+  border-radius: 2px;
+  mix-blend-mode: multiply;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.streaming-caret::after {
+  content: "▍";
+  margin-left: 2px;
+  color: var(--color-brand-500);
+  animation: caret-blink 1s steps(1) infinite;
+}

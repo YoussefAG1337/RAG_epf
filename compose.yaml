@@ -16,6 +16,27 @@ services:
       timeout: 3s
       retries: 20
 
+  # Embedding model in Docker (CPU only). Optional: ./start.sh runs the model natively
+  # instead, which can use the GPU (Docker on macOS cannot). Enable with
+  # --profile docker-embeddings and API_EMBEDDING_URL=http://embeddings:8080.
+  embeddings:
+    profiles: ["docker-embeddings"]
+    build:
+      context: ./embeddings
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/models
+    ports:
+      # Host port used by the ingestion command run outside Docker.
+      - "${EMBEDDING_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8080/health', timeout=2))['ready']"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30m
+
   api:
     build:
       context: ./backend
@@ -24,22 +45,34 @@ services:
       DATABASE_NAME: ${POSTGRES_DB:-course_rag}
       DATABASE_USER: ${POSTGRES_USER:-course_rag}
       DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}
+      EMBEDDING_PROVIDER: local
+      # Native service started by ./start.sh on the host (default), or the Docker one.
+      EMBEDDING_URL: ${API_EMBEDDING_URL:-http://host.docker.internal:8081}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      ANSWER_PROVIDER: ${ANSWER_PROVIDER:-gemini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      RAG_PROVIDER: ${RAG_PROVIDER:-deterministic}
       ANSWER_MODEL: ${ANSWER_MODEL:-gemini-3.8-flash}
       ANSWER_FALLBACK_MODELS: ${ANSWER_FALLBACK_MODELS-gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-gemini-embedding-2}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
       RETRIEVAL_LIMIT: ${RETRIEVAL_LIMIT:-8}
       EVIDENCE_MINIMUM_SCORE: ${EVIDENCE_MINIMUM_SCORE:-}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000,http://127.0.0.1:3000}
+      # The viewer serves original files from the course folder, mounted read-only.
+      PDF_SOURCE_DIR: /course-files
       API_HOST: 0.0.0.0
       API_PORT: 8000
+    volumes:
+      - ./${PDF_SOURCE_DIR:-data/course-pdfs}:/course-files:ro
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux too (built in on Docker Desktop).
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:
       database:
         condition: service_healthy
+      embeddings:
+        condition: service_healthy
+        required: false
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/readiness', timeout=2)"]
       interval: 5s
@@ -49,8 +82,9 @@ services:
   web:
     build:
       context: ./frontend
-    environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      args:
+        # Inlined into the browser bundle at build time.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     ports:
       - "3000:3000"
     depends_on:

@@ -7,6 +7,8 @@ import unicodedata
 from dataclasses import dataclass
 from hashlib import sha256
 
+from app.config import EMBEDDING_DIMENSIONS
+
 # Common French and English function words that would otherwise dominate lexical overlap.
 _STOPWORDS = frozenset(
     """
@@ -40,7 +42,7 @@ class DeterministicEmbeddingProvider:
     vocabulary. This keeps the offline demo useful without semantic understanding.
     """
 
-    dimensions: int = 768
+    dimensions: int = EMBEDDING_DIMENSIONS
 
     @property
     def provider_id(self) -> str:
@@ -72,26 +74,34 @@ class DeterministicEmbeddingProvider:
 
 @dataclass(frozen=True)
 class DeterministicGenerationProvider:
-    """Return a repeatable evidence-backed JSON response without network access."""
+    """Return a repeatable evidence-backed answer without network access.
+
+    Answers with the best excerpt, citing its first line; a follow-up question is
+    "rewritten" to itself.
+    """
 
     response: str | None = None
 
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, prompt: str, *, json_output: bool = True) -> str:
         if not prompt.strip():
             raise ValueError("generation prompt must not be empty")
+        if not json_output:
+            marker = "Dernière question :\n"
+            return prompt.rsplit(marker, maxsplit=1)[-1].strip()
         if self.response is not None:
             return self.response
-        marker = "Evidence:\n"
+        marker = "Extraits :\n"
         if marker not in prompt:
             return json.dumps({"claims": []})
         try:
             excerpts = json.loads(prompt.rsplit(marker, maxsplit=1)[1])
             first = excerpts[0]
-            citation_id = first["citation_id"]
-            excerpt = first["excerpt"]
+            label = first["id"]
+            excerpt = first["extrait"]
         except (IndexError, KeyError, TypeError, json.JSONDecodeError):
             return json.dumps({"claims": []})
+        quote = next((line for line in excerpt.splitlines() if line.strip()), excerpt)
         return json.dumps(
-            {"claims": [{"text": excerpt, "citation_ids": [citation_id]}]},
+            {"claims": [{"text": excerpt, "sources": [{"id": label, "quote": quote}]}]},
             ensure_ascii=False,
         )

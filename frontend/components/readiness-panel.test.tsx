@@ -14,14 +14,14 @@ describe("ReadinessPanel", () => {
     vi.spyOn(api, "fetchReadiness").mockResolvedValue({ status: "ready", service: "course-rag-api" });
     render(<ReadinessPanel />);
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("API ready"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Serveur connecté"));
   });
 
   it("reports unavailable when the API cannot be reached", async () => {
     vi.spyOn(api, "fetchReadiness").mockRejectedValue(new Error("offline"));
     render(<ReadinessPanel />);
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("API unavailable"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Serveur injoignable"));
   });
 
   it("keeps checking and recovers once the API starts answering", async () => {
@@ -31,9 +31,9 @@ describe("ReadinessPanel", () => {
       .mockResolvedValue({ status: "ready", service: "course-rag-api" });
     render(<ReadinessPanel />);
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("API unavailable"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Serveur injoignable"));
     await vi.advanceTimersByTimeAsync(READINESS_RETRY_MS);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("API ready"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Serveur connecté"));
     expect(readiness).toHaveBeenCalledTimes(2);
   });
 });

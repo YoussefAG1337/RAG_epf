@@ -31,14 +31,15 @@ export function ReadinessPanel() {
   }, []);
 
   const message = {
-    checking: "Checking API readiness…",
-    ready: "API ready",
-    unavailable: "API unavailable. Start the local stack and try again.",
+    checking: "Connexion au serveur…",
+    ready: "Serveur connecté",
+    unavailable: "Serveur injoignable, nouvelle tentative…",
   }[state];
+  const dot = { checking: "bg-slate-400", ready: "bg-emerald-500", unavailable: "bg-red-500" }[state];
 
   return (
-    <p className={`status status-${state}`} role="status" aria-live="polite">
-      <span aria-hidden="true" className="status-dot" />
+    <p className="flex items-center gap-2 text-xs text-slate-500" role="status" aria-live="polite">
+      <span aria-hidden="true" className={`h-2 w-2 rounded-full ${dot}`} />
       {message}
     </p>
   );

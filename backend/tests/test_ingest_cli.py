@@ -6,13 +6,12 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from pydantic import SecretStr
 
 from app import ingest
 from app.config import Settings
 from app.ingestion import IngestionError, IngestionResult
 from app.providers.deterministic import DeterministicEmbeddingProvider
-from app.providers.gemini import GeminiEmbeddingProvider
+from app.providers.local import LocalEmbeddingProvider
 
 
 class _Engine:
@@ -88,14 +87,10 @@ def test_cli_returns_nonzero_and_disposes_engine_on_ingestion_error(
     assert "ingestion failed: selected PDF is missing" in capsys.readouterr().err
 
 
-def test_cli_uses_configured_gemini_and_explicit_provider_overrides_it(
+def test_cli_uses_the_local_embeddings_service_and_provider_can_be_overridden(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    settings = Settings(
-        pdf_source_dir=tmp_path,
-        rag_provider="gemini",
-        gemini_api_key=SecretStr("server-test-key"),
-    )
+    settings = Settings(pdf_source_dir=tmp_path, embedding_provider="local")
     engine = _Engine()
     monkeypatch.setattr(ingest, "get_settings", lambda: settings)
     monkeypatch.setattr(ingest, "create_database_engine", lambda _settings: engine)
@@ -115,51 +110,35 @@ def test_cli_uses_configured_gemini_and_explicit_provider_overrides_it(
 
     monkeypatch.setattr(ingest, "ingest_document", fake_ingest_document)
 
-    assert ingest.main(
-        ["--subject", "subject-a", "--course-id", "course-a", "--pdf", "lesson.pdf"]
-    ) == 0
-    assert isinstance(selected[-1], GeminiEmbeddingProvider)
+    assert ingest.main(["--course-id", "course-a", "--file", "lesson.pdf"]) == 0
+    assert isinstance(selected[-1], LocalEmbeddingProvider)
     assert engine.disposed
 
     engine = _Engine()
     monkeypatch.setattr(ingest, "create_database_engine", lambda _settings: engine)
     assert ingest.main(
-        [
-            "--subject", "subject-a", "--course-id", "course-a",
-            "--pdf", "lesson.pdf", "--provider", "deterministic",
-        ]
+        ["--course-id", "course-a", "--file", "lesson.pdf", "--provider", "deterministic"]
     ) == 0
     assert isinstance(selected[-1], DeterministicEmbeddingProvider)
     assert engine.disposed
     capsys.readouterr()
 
 
-def test_cli_fails_clearly_before_ingestion_when_gemini_key_is_missing(
-    monkeypatch, capsys
-) -> None:
+def test_cli_reports_invalid_configuration_clearly(monkeypatch, capsys) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     def missing_key_settings():
-        return Settings(rag_provider="gemini")
+        return Settings(answer_provider="gemini")
 
     monkeypatch.setattr(ingest, "get_settings", missing_key_settings)
     monkeypatch.setattr(
         ingest,
         "create_database_engine",
-        lambda _settings: pytest.fail("database must not be opened without a Gemini key"),
-    )
-    monkeypatch.setattr(
-        ingest,
-        "ingest_document",
-        lambda **_kwargs: pytest.fail("provider request must not run without a Gemini key"),
+        lambda _settings: pytest.fail("database must not be opened with invalid settings"),
     )
 
-    assert ingest.main(
-        ["--subject", "subject-a", "--course-id", "course-a", "--pdf", "lesson.pdf"]
-    ) == 1
-    error = capsys.readouterr().err
-    assert "GEMINI_API_KEY" in error
-    assert "ingestion failed: invalid runtime configuration" in error
+    assert ingest.main(["--course-id", "course-a", "--file", "lesson.pdf"]) == 1
+    assert "ingestion failed: invalid runtime configuration" in capsys.readouterr().err
 
 
 def test_cli_all_ingests_every_course_folder_and_reports_failures(

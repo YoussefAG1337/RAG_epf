@@ -1,10 +1,11 @@
-"""Provider interfaces, direct Gemini adapters, and deterministic test doubles."""
+"""Provider interfaces: local embeddings, Gemini answers, and deterministic test doubles."""
 
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
 )
-from app.providers.gemini import GeminiEmbeddingProvider, GeminiGenerationProvider
+from app.providers.gemini import GeminiGenerationProvider
+from app.providers.local import LocalEmbeddingProvider
 from app.providers.protocols import (
     EmbeddingProvider,
     GenerationProvider,
@@ -15,8 +16,8 @@ __all__ = [
     "DeterministicEmbeddingProvider",
     "DeterministicGenerationProvider",
     "EmbeddingProvider",
-    "GeminiEmbeddingProvider",
     "GeminiGenerationProvider",
     "GenerationProvider",
+    "LocalEmbeddingProvider",
     "ProviderConfigurationError",
 ]

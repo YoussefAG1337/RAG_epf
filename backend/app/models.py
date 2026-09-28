@@ -1,6 +1,7 @@
 """Course-scoped persistence models for source documents and vector chunks."""
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
@@ -17,7 +18,10 @@ from sqlalchemy import (
     Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.config import EMBEDDING_DIMENSIONS
 
 
 class Base(DeclarativeBase):
@@ -94,7 +98,13 @@ class DocumentChunk(Base):
     # Heading path within the document, e.g. "Chapitre 2 : Les arbres > Parcours".
     section_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float]] = mapped_column(Vector(768), nullable=False)
+    # Located source lines: [{"s", "e", "p", "b" | "l"}] (see app.locating).
+    locations: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    embedding: Mapped[list[float]] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -114,5 +124,50 @@ class EmbeddingSchemaMetadata(Base):
     embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)
     embedding_dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Conversation(Base):
+    """A saved chat, optionally scoped to a subject, course, or document."""
+
+    __tablename__ = "conversations"
+    __table_args__ = (CheckConstraint("length(title) > 0", name="ck_conversations_title_nonempty"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # {"subject": ..., "course_id": ..., "document_id": ...}; absent keys mean unscoped.
+    scope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Message(Base):
+    """One user question or assistant answer, with the answer's claims and citations."""
+
+    __tablename__ = "messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_messages_role"),
+        ForeignKeyConstraint(
+            ["conversation_id"],
+            ["conversations.id"],
+            name="fk_messages_conversation",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("conversation_id", "position", name="uq_messages_conversation_position"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    conversation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Assistant answers: {"claims": [...], "citations": [...], "status": ...}.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

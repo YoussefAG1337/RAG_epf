@@ -1,0 +1,42 @@
+{
+  "_comment": "Questions about the EPF course material with the passages that answer them. A target matches a retrieved chunk when its source path contains 'source' and its section or text contains 'match'. 'off_topic' questions must be refused.",
+  "questions": [
+    {"question": "Comment fonctionne le chiffrement RSA ?", "targets": [{"source": "slides.pdf", "match": "RSA : Rivest"}, {"source": "slides.pdf", "match": "RSA : un chiffrement"}]},
+    {"question": "How does RSA key generation work?", "targets": [{"source": "slides.pdf", "match": "RSA : Rivest"}]},
+    {"question": "Qu'a dit Kerckhoffs sur les systèmes cryptographiques ?", "targets": [{"source": "slides.pdf", "match": "Kerckhoffs"}]},
+    {"question": "Comment marche le chiffre de César ?", "targets": [{"source": "slides.pdf", "match": "César"}]},
+    {"question": "Explique l'échange de clés Diffie-Hellman", "targets": [{"source": "slides.pdf", "match": "Diffie-Hellman"}, {"source": "TD2", "match": "Diffie-Hellman"}]},
+    {"question": "Qu'est-ce qu'un réseau de Feistel ?", "targets": [{"source": "slides.pdf", "match": "Feistel"}]},
+    {"question": "Pourquoi p et q doivent-ils rester secrets dans RSA ?", "targets": [{"source": "slides.pdf", "match": "Sécurité de RSA"}]},
+    {"question": "C'est quoi une attaque par canal auxiliaire ?", "targets": [{"source": "slides.pdf", "match": "canal auxiliaire"}]},
+    {"question": "Comment signer numériquement un message avec RSA ?", "targets": [{"source": "slides.pdf", "match": "Signature RSA"}]},
+    {"question": "exercice sur l'exponentiation modulaire rapide", "targets": [{"source": "TD3", "match": "Exponentiation"}]},
+    {"question": "Quel exercice du TD porte sur Elgamal ?", "targets": [{"source": "TD2", "match": "Elgamal"}]},
+    {"question": "man in the middle attack exercise", "targets": [{"source": "TD2", "match": "homme du milieu"}]},
+    {"question": "mode de chiffrement par chaînage des blocs", "targets": [{"source": "slides.pdf", "match": "CBC"}]},
+    {"question": "À quoi sert un hyperviseur ?", "targets": [{"source": "virtualisation", "match": "rôle principal d’un hyperviseur"}]},
+    {"question": "migrer une machine virtuelle à chaud d'un serveur à un autre", "targets": [{"source": "virtualisation", "match": "vMotion"}]},
+    {"question": "What is a VM snapshot?", "targets": [{"source": "virtualisation", "match": "snapshot"}]},
+    {"question": "répartir automatiquement la charge dans un cluster", "targets": [{"source": "virtualisation", "match": "distribue automatiquement la charge"}]},
+    {"question": "économiser de l'espace disque en supprimant les doublons", "targets": [{"source": "virtualisation", "match": "déduplication"}]},
+    {"question": "allouer le stockage selon l'usage réel", "targets": [{"source": "virtualisation", "match": "Thin Provisioning"}]},
+    {"question": "différence entre moyenne et médiane", "targets": [{"source": "stat", "match": "Measures of center"}, {"source": "Synthese", "match": "Mesures de tendance centrale"}]},
+    {"question": "How do you say écart-type in English?", "targets": [{"source": "Anglais.txt", "match": "Standard deviation"}]},
+    {"question": "Quand faut-il rejeter l'hypothèse nulle ?", "targets": [{"source": "Synthese", "match": "P-value"}, {"source": "Synthese", "match": "Tests d'hypothèses"}]},
+    {"question": "formule du théorème de Bayes", "targets": [{"source": "stat", "match": "Bayes"}]},
+    {"question": "loi de Poisson", "targets": [{"source": "stat", "match": "Poisson"}]},
+    {"question": "réduire la dimension des données avec l'ACP", "targets": [{"source": "stat", "match": "Principal Component"}]},
+    {"question": "algorithme des k-moyennes", "targets": [{"source": "stat", "match": "K-means"}, {"source": "stat", "match": "K-Means"}]},
+    {"question": "étapes d'un modèle ARIMA pour les séries temporelles", "targets": [{"source": "stat", "match": "ARIMA"}]},
+    {"question": "hypothèses du test ANOVA à un facteur", "targets": [{"source": "stat", "match": "ANOVA"}]},
+    {"question": "régression linéaire multiple", "targets": [{"source": "stat", "match": "Multi-linear"}, {"source": "stat", "match": "gression linéaire multiple"}]},
+    {"question": "distribution leptokurtique", "targets": [{"source": "stat", "match": "Leptokurtique"}]}
+  ],
+  "off_topic": [
+    "Qui a gagné la coupe du monde 2018 ?",
+    "Recette de la pâte à crêpes",
+    "Quel temps fera-t-il demain à Paris ?",
+    "Comment réparer un vélo crevé ?",
+    "Who painted the Mona Lisa?"
+  ]
+}

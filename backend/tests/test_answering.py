@@ -1,8 +1,10 @@
-"""Offline tests for course-scoped retrieval and citation validation."""
+"""Offline tests for scoped retrieval, quote-verified claims, streaming, and follow-ups."""
 
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -13,205 +15,61 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.answering import (
+    AnswerEvent,
+    HistoryTurn,
     InvalidGroundedResponseError,
     NoEvidenceError,
+    Scope,
     UnsupportedQuestionError,
+    _ClaimStreamParser,
+    answer_events,
     answer_question,
     list_courses,
 )
 from app.config import Settings
 
-
-class _FakeResult:
-    def __init__(self, rows: list[SimpleNamespace]) -> None:
-        self.rows = rows
-
-    def all(self) -> list[SimpleNamespace]:
-        return self.rows
+DOCUMENT = UUID("00000000-0000-0000-0000-0000000000d1")
+CHUNK_A = UUID("00000000-0000-0000-0000-00000000000a")
+CHUNK_B = UUID("00000000-0000-0000-0000-00000000000b")
 
 
-class _FakeSession:
-    def __init__(self, factory: _FakeSessionFactory) -> None:
-        self.factory = factory
-
-    def __enter__(self) -> _FakeSession:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        return None
-
-    def execute(self, statement: Any) -> _FakeResult:
-        compiled = statement.compile(dialect=postgresql.dialect())
-        self.factory.statement = str(compiled)
-        self.factory.parameters = compiled.params
-        requested_course = next(
-            value for value in compiled.params.values() if value == "course-a"
-        )
-        filtered_rows = [row for row in self.factory.rows if row.course_id == requested_course]
-        return _FakeResult(
-            sorted(filtered_rows, key=lambda row: row.distance)[: self.factory.limit]
-        )
-
-
-class _FakeSessionFactory:
-    def __init__(self, rows: list[SimpleNamespace], limit: int = 8) -> None:
-        self.rows = rows
-        self.limit = limit
-        self.statement = ""
-        self.parameters: dict[str, Any] = {}
-
-    def __call__(self) -> AbstractContextManager[_FakeSession]:
-        return cast(AbstractContextManager[_FakeSession], _FakeSession(self))
-
-
-class _FixedEmbedder:
-    async def embed(self, _text: str) -> list[float]:
-        return [0.25] * 768
-
-
-class _FixedGenerator:
-    def __init__(self, response: str) -> None:
-        self.response = response
-        self.prompt = ""
-
-    async def generate(self, prompt: str) -> str:
-        self.prompt = prompt
-        return self.response
-
-
-def _evidence_row(
+def _row(
+    chunk_id: UUID = CHUNK_A,
     *,
-    chunk_id: str = "00000000-0000-0000-0000-000000000002",
-    text: str = "Water boils at 100 degrees Celsius at sea level.",
-    filename: str = "Cours1.pdf",
-    page: int = 2,
+    text: str = "RSA repose sur la factorisation.\nÉtant donné n = pq, retrouver p et q.",
     distance: float = 0.1,
+    page: int = 55,
+    course_id: str = "Cryptographie",
 ) -> SimpleNamespace:
+    first_line_end = text.find("\n") if "\n" in text else len(text)
     return SimpleNamespace(
-        id=UUID(chunk_id),
-        subject="Sciences",
-        course_id="course-a",
-        title="Cours 1",
-        section_title="Chapitre 1 > Ébullition",
+        id=chunk_id,
+        document_id=DOCUMENT,
+        course_id=course_id,
         physical_page_number=page,
+        section_title="RSA : un chiffrement asymétrique",
         text=text,
-        source_filename=filename,
+        locations=[
+            {"s": 0, "e": first_line_end, "p": page, "b": [0.1, 0.2, 0.8, 0.25]},
+            {"s": first_line_end + 1, "e": len(text), "p": page, "b": [0.1, 0.3, 0.8, 0.35]},
+        ],
+        subject="Général",
+        title="Introduction à la cryptologie",
+        source_filename="Cryptographie/slides.pdf",
         distance=distance,
     )
 
 
-def test_retrieval_filters_course_in_sql_before_vector_ranking() -> None:
-    citation_id = "00000000-0000-0000-0000-000000000002"
-    generator = _FixedGenerator(
-        '{"claims":[{"text":"Water boils at 100 degrees Celsius at sea level.",'
-        '"citation_ids":["' + citation_id + '"]}]}'
-    )
-    session_factory = _FakeSessionFactory([_evidence_row()])
-    wrong_course = _evidence_row(
-        chunk_id="00000000-0000-0000-0000-000000000003",
-        text="Wrong course fact.",
-        filename="OtherCourse.pdf",
-        distance=0.01,
-    )
-    wrong_course.course_id = "course-b"
-    session_factory.rows.append(wrong_course)
-
-    answer = asyncio.run(
-        answer_question(
-            question="What is the boiling point of water?",
-            course_id="course-a",
-            session_factory=cast(sessionmaker[Session], session_factory),
-            embedding_provider=_FixedEmbedder(),
-            generation_provider=generator,
-            settings=Settings(),
-        )
-    )
-
-    where_position = session_factory.statement.index("WHERE")
-    order_position = session_factory.statement.index("ORDER BY")
-    assert where_position < order_position
-    assert "document_chunks.course_id" in session_factory.statement
-    assert "ix_chunks_embedding_hnsw" not in session_factory.statement
-    assert "course-a" in session_factory.parameters.values()
-    assert answer.claims[0].text.startswith("Water boils")
-    assert answer.citations[0].source_filename == "Cours1.pdf"
-    assert answer.citations[0].physical_page_number == 2
-    assert answer.citations[0].excerpt == "Water boils at 100 degrees Celsius at sea level."
-    assert all(citation.source_filename != "OtherCourse.pdf" for citation in answer.citations)
-    assert "Water boils at 100 degrees Celsius" in generator.prompt
-    assert "What is the boiling point of water?" in generator.prompt
-
-
-def test_unresolved_citation_is_rejected_before_returning_an_answer() -> None:
-    generator = _FixedGenerator(
-        '{"claims":[{"text":"An unsupported claim.","citation_ids":["not-retrieved"]}]}'
-    )
-    with pytest.raises(InvalidGroundedResponseError, match="not retrieved"):
-        asyncio.run(
-            answer_question(
-                question="What happened?",
-                course_id="course-a",
-                session_factory=cast(
-                    sessionmaker[Session], _FakeSessionFactory([_evidence_row()])
-                ),
-                embedding_provider=_FixedEmbedder(),
-                generation_provider=generator,
-                settings=Settings(),
-            )
-        )
-
-
-def test_no_relevant_evidence_does_not_call_generation() -> None:
-    generator = _FixedGenerator('{"claims":[]}')
-    with pytest.raises(NoEvidenceError):
-        asyncio.run(
-            answer_question(
-                question="What happened?",
-                course_id="course-a",
-                session_factory=cast(sessionmaker[Session], _FakeSessionFactory([])),
-                embedding_provider=_FixedEmbedder(),
-                generation_provider=generator,
-                settings=Settings(),
-            )
-        )
-    assert generator.prompt == ""
-
-
-def test_unrelated_factual_context_is_not_added_to_generation_prompt() -> None:
-    citation_id = "00000000-0000-0000-0000-000000000002"
-    generator = _FixedGenerator(
-        '{"claims":[{"text":"A supported fact.",'
-        '"citation_ids":["' + citation_id + '"]}]}'
-    )
-    asyncio.run(
-        answer_question(
-            question="Question text",
-            course_id="course-a",
-            session_factory=cast(
-                sessionmaker[Session],
-                _FakeSessionFactory([_evidence_row(text="A supported fact.")]),
-            ),
-            embedding_provider=_FixedEmbedder(),
-            generation_provider=generator,
-            settings=Settings(),
-        )
-    )
-
-    assert "Question text" in generator.prompt
-    assert "A supported fact." in generator.prompt
-    assert "different course" not in generator.prompt
-    assert "general knowledge" not in generator.prompt
-
-
-class _AllCoursesSessionFactory:
-    """Records the statement and returns rows unfiltered, like a query with no course filter."""
+class _Sessions:
+    """Records the compiled query and returns the given rows ordered by distance."""
 
     def __init__(self, rows: list[SimpleNamespace]) -> None:
         self.rows = rows
-        self.statement = ""
+        self.sql = ""
+        self.params: dict[str, Any] = {}
 
-    def __call__(self) -> Any:
-        factory = self
+    def __call__(self) -> AbstractContextManager[Any]:
+        sessions = self
 
         class _Session:
             def __enter__(self) -> _Session:
@@ -220,121 +78,270 @@ class _AllCoursesSessionFactory:
             def __exit__(self, *_args: object) -> None:
                 return None
 
-            def execute(self, statement: Any) -> _FakeResult:
-                factory.statement = str(statement.compile(dialect=postgresql.dialect()))
-                return _FakeResult(factory.rows)
+            def execute(self, statement: Any) -> Any:
+                compiled = statement.compile(dialect=postgresql.dialect())
+                sessions.sql = str(compiled)
+                sessions.params = dict(compiled.params)
+                rows = sorted(sessions.rows, key=lambda row: getattr(row, "distance", 0))
+                return SimpleNamespace(all=lambda: rows)
 
         return _Session()
 
 
-def test_missing_course_searches_all_courses_and_cites_each_course() -> None:
-    first = _evidence_row(text="Course A fact.")
-    second = _evidence_row(
-        chunk_id="00000000-0000-0000-0000-000000000003", text="Course B fact.", distance=0.2
-    )
-    second.course_id = "course-b"
-    generator = _FixedGenerator(
-        '{"claims":[{"text":"Both facts.","citation_ids":["'
-        + str(first.id) + '","' + str(second.id) + '"]}]}'
-    )
-    session_factory = _AllCoursesSessionFactory([first, second])
+class _Embedder:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
 
-    answer = asyncio.run(
-        answer_question(
-            question="Which facts?",
-            course_id=None,
-            session_factory=cast(sessionmaker[Session], session_factory),
-            embedding_provider=_FixedEmbedder(),
-            generation_provider=generator,
-            settings=Settings(),
+    async def embed(self, text: str) -> list[float]:
+        self.queries.append(text)
+        return [0.25] * 1024
+
+
+class _Generator:
+    def __init__(self, response: str, rewritten: str | None = None) -> None:
+        self.response = response
+        self.rewritten = rewritten
+        self.prompts: list[str] = []
+
+    async def generate(self, prompt: str, *, json_output: bool = True) -> str:
+        self.prompts.append(prompt)
+        if not json_output:
+            return self.rewritten or prompt.rsplit("\n", 1)[-1]
+        return self.response
+
+
+class _StreamingGenerator(_Generator):
+    def __init__(self, pieces: list[str]) -> None:
+        super().__init__("".join(pieces))
+        self.pieces = pieces
+
+    async def generate_stream(self, prompt: str) -> AsyncIterator[str]:
+        self.prompts.append(prompt)
+        for piece in self.pieces:
+            yield piece
+
+
+def _answer(**overrides: Any) -> Any:
+    arguments: dict[str, Any] = {
+        "question": "Comment fonctionne RSA ?",
+        "scope": Scope(),
+        "session_factory": cast(sessionmaker[Session], _Sessions([_row()])),
+        "embedding_provider": _Embedder(),
+        "generation_provider": _Generator('{"claims":[]}'),
+        "settings": Settings(),
+    }
+    arguments.update(overrides)
+    return asyncio.run(answer_question(**arguments))
+
+
+def _claims(*claims: dict[str, Any]) -> str:
+    return json.dumps({"claims": list(claims)}, ensure_ascii=False)
+
+
+def test_claims_cite_labels_and_verified_quotes_become_highlights() -> None:
+    generator = _Generator(
+        _claims(
+            {
+                "text": "RSA repose sur la difficulté de factoriser n = pq.",
+                "sources": [{"id": "S1", "quote": "étant donné n = pq, retrouver p et q"}],
+            }
         )
     )
 
-    assert "WHERE" not in session_factory.statement
-    assert [citation.course_id for citation in answer.citations] == ["course-a", "course-b"]
+    answer = _answer(generation_provider=generator)
+
+    assert [claim.model_dump() for claim in answer.claims] == [
+        {"text": "RSA repose sur la difficulté de factoriser n = pq.", "citations": [1]}
+    ]
+    citation = answer.citations[0]
+    assert (citation.number, citation.document_id, citation.page) == (1, str(DOCUMENT), 55)
+    assert citation.quotes == ["Étant donné n = pq, retrouver p et q"]
+    # Only the quoted line is highlighted, not the whole excerpt.
+    assert [item.model_dump() for item in citation.highlights] == [
+        {"page": 55, "boxes": [[0.1, 0.3, 0.8, 0.35]], "lines": []}
+    ]
+    assert '"id": "S1"' in generator.prompts[0]
+    assert "langue de la question" in generator.prompts[0]
 
 
-def test_empty_claims_mean_the_evidence_does_not_answer() -> None:
-    with pytest.raises(UnsupportedQuestionError):
-        asyncio.run(
-            answer_question(
-                question="Unrelated question?",
-                course_id="course-a",
-                session_factory=cast(
-                    sessionmaker[Session], _FakeSessionFactory([_evidence_row()])
-                ),
-                embedding_provider=_FixedEmbedder(),
-                generation_provider=_FixedGenerator('{"claims":[]}'),
-                settings=Settings(),
+def test_unverifiable_quotes_highlight_the_whole_excerpt() -> None:
+    answer = _answer(
+        generation_provider=_Generator(
+            _claims(
+                {
+                    "text": "Une affirmation.",
+                    "sources": [{"id": "S1", "quote": "texte absent de l'extrait"}],
+                }
             )
         )
-
-
-def test_prompt_asks_for_question_language_and_explicit_abstention() -> None:
-    citation_id = "00000000-0000-0000-0000-000000000002"
-    generator = _FixedGenerator(
-        '{"claims":[{"text":"Un fait.","citation_ids":["' + citation_id + '"]}]}'
     )
-    asyncio.run(
-        answer_question(
-            question="Quelle est la réponse ?",
-            course_id="course-a",
-            session_factory=cast(
-                sessionmaker[Session], _FakeSessionFactory([_evidence_row()])
-            ),
-            embedding_provider=_FixedEmbedder(),
-            generation_provider=generator,
-            settings=Settings(),
+
+    assert answer.citations[0].quotes == []
+    assert len(answer.citations[0].highlights[0].boxes) == 2
+
+
+def test_unknown_sources_are_dropped_and_unsupported_claims_hidden() -> None:
+    generator = _Generator(
+        _claims(
+            {"text": "Soutenue.", "sources": [{"id": "S1", "quote": "RSA repose"}, {"id": "S9"}]},
+            {"text": "Inventée.", "sources": [{"id": "S7", "quote": "rien"}]},
         )
     )
 
-    assert "same language as the question" in generator.prompt
-    assert '{"claims":[]}' in generator.prompt
+    answer = _answer(generation_provider=generator)
+
+    assert [claim.text for claim in answer.claims] == ["Soutenue."]
+    assert [citation.number for citation in answer.citations] == [1]
 
 
-def test_list_courses_groups_documents_by_course() -> None:
-    rows = [
-        SimpleNamespace(
-            subject="Informatique", course_id="algo-101", document_count=2, page_count=40
-        ),
-        SimpleNamespace(subject="Maths", course_id="math-200", document_count=1, page_count=12),
-    ]
-    session_factory = _AllCoursesSessionFactory(rows)
-
-    courses = list_courses(cast(sessionmaker[Session], session_factory))
-
-    assert "GROUP BY documents.subject, documents.course_id" in session_factory.statement
-    assert [course.model_dump() for course in courses] == [
-        {"subject": "Informatique", "course_id": "algo-101", "document_count": 2,
-         "page_count": 40},
-        {"subject": "Maths", "course_id": "math-200", "document_count": 1, "page_count": 12},
-    ]
-
-
-def test_subject_scope_filters_in_sql_and_evidence_carries_its_place_in_the_course() -> None:
-    citation_id = "00000000-0000-0000-0000-000000000002"
-    generator = _FixedGenerator(
-        '{"claims":[{"text":"Water boils at 100 C.","citation_ids":["' + citation_id + '"]}]}'
+def test_citations_are_numbered_in_order_of_first_use() -> None:
+    sessions = _Sessions(
+        [_row(CHUNK_A, distance=0.1), _row(CHUNK_B, text="AES chiffre par blocs.", distance=0.2)]
     )
-    session_factory = _AllCoursesSessionFactory([_evidence_row()])
-
-    answer = asyncio.run(
-        answer_question(
-            question="Boiling point?",
-            course_id=None,
-            subject="Sciences",
-            session_factory=cast(sessionmaker[Session], session_factory),
-            embedding_provider=_FixedEmbedder(),
-            generation_provider=generator,
-            settings=Settings(),
+    generator = _Generator(
+        _claims(
+            {"text": "Premier.", "sources": [{"id": "S2", "quote": "AES chiffre par blocs"}]},
+            {"text": "Second.", "sources": [{"id": "S1", "quote": "RSA repose"}, {"id": "S2"}]},
         )
     )
 
-    assert "documents.subject = " in session_factory.statement
-    assert '"subject": "Sciences"' in generator.prompt
-    assert '"document": "Cours 1"' in generator.prompt
-    assert '"section": "Chapitre 1 > Ébullition"' in generator.prompt
-    citation = answer.citations[0]
-    assert (citation.subject, citation.document_title, citation.section_title) == (
-        "Sciences", "Cours 1", "Chapitre 1 > Ébullition"
+    answer = _answer(session_factory=sessions, generation_provider=generator)
+
+    assert [claim.citations for claim in answer.claims] == [[1], [2, 1]]
+    assert [citation.chunk_id for citation in answer.citations] == [str(CHUNK_B), str(CHUNK_A)]
+
+
+def test_empty_claims_or_no_evidence_abstain() -> None:
+    with pytest.raises(UnsupportedQuestionError):
+        _answer(generation_provider=_Generator('{"claims":[]}'))
+
+    generator = _Generator(_claims({"text": "x", "sources": [{"id": "S1"}]}))
+    with pytest.raises(NoEvidenceError):
+        _answer(
+            session_factory=cast(sessionmaker[Session], _Sessions([])),
+            generation_provider=generator,
+        )
+    assert generator.prompts == []  # nothing is generated without evidence
+
+    low = _Sessions([_row(distance=0.95)])
+    with pytest.raises(NoEvidenceError):
+        _answer(session_factory=cast(sessionmaker[Session], low), generation_provider=generator)
+
+
+def test_malformed_model_output_is_rejected() -> None:
+    with pytest.raises(InvalidGroundedResponseError):
+        _answer(generation_provider=_Generator("not json"))
+
+
+@pytest.mark.parametrize(
+    ("scope", "fragment"),
+    [
+        (Scope(course_id="Cryptographie"), "document_chunks.course_id = "),
+        (Scope(subject="Informatique"), "documents.subject = "),
+        (Scope(document_id=DOCUMENT), "document_chunks.document_id = "),
+    ],
+)
+def test_scope_filters_in_sql_before_ranking(scope: Scope, fragment: str) -> None:
+    sessions = _Sessions([_row()])
+    _answer(
+        scope=scope,
+        session_factory=cast(sessionmaker[Session], sessions),
+        generation_provider=_Generator(_claims({"text": "x", "sources": [{"id": "S1"}]})),
     )
+
+    assert fragment in sessions.sql
+    assert sessions.sql.index("WHERE") < sessions.sql.index("ORDER BY")
+
+
+def test_unscoped_search_has_no_filter() -> None:
+    sessions = _Sessions([_row()])
+    _answer(
+        session_factory=cast(sessionmaker[Session], sessions),
+        generation_provider=_Generator(_claims({"text": "x", "sources": [{"id": "S1"}]})),
+    )
+    assert "WHERE" not in sessions.sql
+
+
+def test_follow_up_questions_are_rewritten_before_searching() -> None:
+    embedder = _Embedder()
+    generator = _Generator(
+        _claims({"text": "x", "sources": [{"id": "S1"}]}), rewritten="Comment fonctionne AES ?"
+    )
+    history = [
+        HistoryTurn(role="user", content="Comment fonctionne RSA ?"),
+        HistoryTurn(role="assistant", content="RSA repose sur la factorisation."),
+    ]
+
+    answer = _answer(
+        question="Et pour AES ?",
+        history=history,
+        embedding_provider=embedder,
+        generation_provider=generator,
+    )
+
+    assert embedder.queries == ["Comment fonctionne AES ?"]
+    assert answer.retrieval_query == "Comment fonctionne AES ?"
+    assert "Et pour AES ?" in generator.prompts[0]  # the rewrite prompt
+    assert "Conversation précédente" in generator.prompts[1]  # the answer sees the history
+    assert "Question :\nEt pour AES ?" in generator.prompts[1]
+
+
+def test_first_question_is_searched_as_asked() -> None:
+    embedder = _Embedder()
+    generator = _Generator(_claims({"text": "x", "sources": [{"id": "S1"}]}))
+    _answer(embedding_provider=embedder, generation_provider=generator)
+    assert embedder.queries == ["Comment fonctionne RSA ?"]
+    assert len(generator.prompts) == 1
+
+
+def test_streamed_claims_are_emitted_as_soon_as_each_is_complete() -> None:
+    response = _claims(
+        {"text": "Premier.", "sources": [{"id": "S1", "quote": "RSA repose"}]},
+        {"text": "Second, avec une accolade } dans le texte.", "sources": [{"id": "S1"}]},
+    )
+    pieces = [response[index : index + 7] for index in range(0, len(response), 7)]
+    generator = _StreamingGenerator(pieces)
+
+    async def collect() -> list[AnswerEvent]:
+        return [
+            event
+            async for event in answer_events(
+                question="Comment fonctionne RSA ?",
+                scope=Scope(),
+                history=[],
+                session_factory=cast(sessionmaker[Session], _Sessions([_row()])),
+                embedding_provider=_Embedder(),
+                generation_provider=generator,
+                settings=Settings(),
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.kind for event in events] == ["retrieved", "claim", "claim", "citations"]
+    assert events[2].claim is not None and "accolade }" in events[2].claim.text
+
+
+def test_claim_parser_handles_arbitrary_chunk_boundaries() -> None:
+    parser = _ClaimStreamParser()
+    text = '{"claims": [ {"text": "a \\"b\\"", "sources": []} , {"text": "c", "sources": []} ]}'
+    found: list[dict[str, Any]] = []
+    for character in text:
+        found.extend(parser.feed(character))
+    assert [claim["text"] for claim in found] == ['a "b"', "c"]
+    assert parser.finished
+
+
+def test_list_courses_groups_documents_by_subject_and_course() -> None:
+    rows = [SimpleNamespace(subject="Général", course_id="stat", document_count=6, page_count=116)]
+    sessions = _Sessions(rows)
+
+    courses = list_courses(cast(sessionmaker[Session], sessions))
+
+    assert "GROUP BY documents.subject, documents.course_id" in sessions.sql
+    assert courses[0].model_dump() == {
+        "subject": "Général",
+        "course_id": "stat",
+        "document_count": 6,
+        "page_count": 116,
+    }

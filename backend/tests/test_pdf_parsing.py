@@ -9,6 +9,7 @@ from pathlib import Path
 import pymupdf
 from test_ingestion import _FakeSessionFactory, _run_ingestion, _slides_pdf
 
+from app.config import EMBEDDING_DIMENSIONS
 from app.ingestion import contextual_embedding_text, preview_document, title_from_filename
 from app.pdf_parsing import CORRECT_ANSWER_MARK, _clean, parse_pdf
 
@@ -82,7 +83,7 @@ def test_ingestion_tracks_sections_and_embeds_chunks_with_their_course_context(
 
         async def embed_batch(self, texts: list[str]) -> list[list[float]]:
             embedded.extend(texts)
-            return [[0.5] * 768 for _ in texts]
+            return [[0.5] * EMBEDDING_DIMENSIONS for _ in texts]
 
     database = _FakeSessionFactory()
     asyncio.run(

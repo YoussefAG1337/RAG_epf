@@ -24,7 +24,7 @@ from app.ingestion import (
     preview_document,
 )
 from app.providers.deterministic import DeterministicEmbeddingProvider
-from app.providers.gemini import GeminiEmbeddingProvider
+from app.providers.local import LocalEmbeddingProvider
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -62,9 +62,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=("deterministic", "gemini"),
+        choices=("local", "deterministic"),
         default=None,
-        help="override configured RAG_PROVIDER (Gemini requires GEMINI_API_KEY)",
+        help="override EMBEDDING_PROVIDER (local: the embeddings container)",
     )
     parser.add_argument(
         "--dry-run",
@@ -138,20 +138,15 @@ def _dry_run(args: argparse.Namespace) -> int:
 
 async def _ingest(args: argparse.Namespace) -> int:
     settings = get_settings()
-    selected_provider = args.provider or settings.rag_provider
-    if selected_provider == "gemini" and (
-        settings.gemini_api_key is None or not settings.gemini_api_key.get_secret_value()
-    ):
-        raise IngestionError("GEMINI_API_KEY is required when selecting the Gemini provider")
+    selected_provider = args.provider or settings.embedding_provider
     engine = create_database_engine(settings)
-    provider = (
+    provider: DeterministicEmbeddingProvider | LocalEmbeddingProvider = (
         DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
         if selected_provider == "deterministic"
-        else GeminiEmbeddingProvider(
-            settings.gemini_api_key,
+        else LocalEmbeddingProvider(
+            settings.embedding_url,
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
-            rate_limit_retries=10,
         )
     )
     try:
@@ -178,8 +173,8 @@ async def _ingest(args: argparse.Namespace) -> int:
                 continue
             _report(result, selection)
     finally:
-        if isinstance(provider, GeminiEmbeddingProvider):
-            provider.close()
+        if isinstance(provider, LocalEmbeddingProvider):
+            await provider.aclose()
         engine.dispose()
 
     if args.all:
@@ -210,7 +205,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = _parser()
     args = parser.parse_args(argv)
-    # Show provider waits ("rate limit reached; waiting 34s") while a long run is paused.
     logging.basicConfig(level=logging.WARNING, format="%(message)s", stream=sys.stderr)
     if args.file is not None and args.course_id is None:
         parser.error("--course-id is required with --file")
@@ -223,8 +217,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except ValidationError:
         print(
-            "ingestion failed: invalid runtime configuration; check RAG_PROVIDER "
-            "and GEMINI_API_KEY",
+            "ingestion failed: invalid runtime configuration; check .env "
+            "(EMBEDDING_PROVIDER, ANSWER_PROVIDER, GEMINI_API_KEY)",
             file=sys.stderr,
         )
         return 1

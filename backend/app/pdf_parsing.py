@@ -23,7 +23,7 @@ from typing import Any
 
 import pymupdf
 
-from app.parsed import ParsedDocument, ParsedPage, Segment
+from app.parsed import LineRef, ParsedDocument, ParsedPage, Segment
 
 # Text at least this much larger than the document's body text is a heading.
 HEADING_SIZE_RATIO = 1.2
@@ -81,6 +81,10 @@ class _Line:
     bottom: float
     block: int
     highlighted: bool = False
+    # Position on the page as fractions of its width and height: x0, y0, x1, y1.
+    box: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    # Position in the page's kept lines, set once headers and footers are removed.
+    index: int = -1
 
 
 def _clean(text: str) -> str:
@@ -137,6 +141,8 @@ def _page_lines(page: Any) -> list[_Line]:
             if not text:
                 continue
             rect = pymupdf.Rect(line["bbox"])
+            width = float(page.rect.width) or 1.0
+            height = float(page.rect.height) or 1.0
             highlighted = False
             for highlight in highlights:
                 overlap = rect & highlight
@@ -148,6 +154,12 @@ def _page_lines(page: Any) -> list[_Line]:
                     text=text,
                     size=size,
                     top=float(rect.y0),
+                    box=(
+                        max(0.0, float(rect.x0) / width),
+                        max(0.0, float(rect.y0) / height),
+                        min(1.0, float(rect.x1) / width),
+                        min(1.0, float(rect.y1) / height),
+                    ),
                     bottom=float(rect.y1),
                     block=block_index,
                     highlighted=highlighted,
@@ -240,6 +252,10 @@ def _join_lines(lines: list[_Line]) -> str:
     return "\n".join(item for item in items if item.strip(" -"))
 
 
+def _indices(lines: list[_Line]) -> tuple[int, ...]:
+    return tuple(sorted(line.index for line in lines))
+
+
 def _join_heading(lines: list[_Line]) -> str:
     heading = ""
     for line in lines:
@@ -260,14 +276,21 @@ def _slide_segments(lines: list[_Line], body_size: float) -> tuple[list[Segment]
     ]
     if not candidates:
         text = _join_lines(lines)
-        return ([Segment(heading_path=(), text=text)] if text else []), False
+        segments = [Segment(heading_path=(), text=text, line_indices=_indices(lines))]
+        return (segments if text else []), False
     largest = max(line.size for line in candidates)
     title_block = next(line.block for line in candidates if line.size >= largest - 0.5)
     title_lines = [
         line for line in lines if line.block == title_block and line.size >= largest - 0.5
     ]
     body = [line for line in lines if line not in title_lines]
-    return [Segment(heading_path=(_join_heading(title_lines),), text=_join_lines(body))], True
+    return [
+        Segment(
+            heading_path=(_join_heading(title_lines),),
+            text=_join_lines(body),
+            line_indices=_indices(title_lines + body),
+        )
+    ], True
 
 
 def _segments(
@@ -308,6 +331,7 @@ def _segments(
         Segment(
             heading_path=(_join_heading(heading),) if heading else (),
             text=_join_lines(body),
+            line_indices=_indices(heading + body),
         )
         for heading, body in groups
     ]
@@ -335,6 +359,11 @@ def _split_questions(segments: list[Segment]) -> list[Segment]:
         return segments
 
     owner = lines[starts[0]][0]
+    # Question text is re-split by line, so each question keeps all candidate source lines;
+    # locating then finds its own lines among them.
+    candidate_indices = tuple(
+        sorted({index for segment in segments[owner:] for index in segment.line_indices})
+    )
     result = list(segments[:owner])
     leading = [line for index, line in lines[: starts[0]] if index == owner]
     if segments[owner].heading_path or leading:
@@ -344,7 +373,13 @@ def _split_questions(segments: list[Segment]) -> list[Segment]:
         question_lines = [line for _, line in lines[start:end]]
         match = _QUESTION.match(question_lines[0])
         label = f"Question {match.group(1)}" if match else f"Question {number + 1}"
-        result.append(Segment(heading_path=(label,), text="\n".join(question_lines)))
+        result.append(
+            Segment(
+                heading_path=(label,),
+                text="\n".join(question_lines),
+                line_indices=candidate_indices,
+            )
+        )
     return result
 
 
@@ -433,6 +468,7 @@ def parse_pdf(data: bytes) -> ParsedDocument:
                 )
             )
         ]
+        kept = [replace(line, index=position) for position, line in enumerate(kept)]
         segments, titled = _segments(kept, height, body_size, slide=slide)
         segments = _split_questions(segments)
         if segments:
@@ -442,6 +478,9 @@ def parse_pdf(data: bytes) -> ParsedDocument:
                     segments=tuple(segments),
                     titled=titled,
                     image_share=image_share,
+                    lines=tuple(
+                        LineRef(text=_marked(line), page=number, box=line.box) for line in kept
+                    ),
                 )
             )
         else:

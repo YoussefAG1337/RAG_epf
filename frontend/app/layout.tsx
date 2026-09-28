@@ -3,13 +3,13 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Local Course RAG Assistant",
-  description: "Local development scaffold for the course assistant.",
+  title: "Assistant de cours",
+  description: "Posez vos questions sur les supports de cours et consultez les sources exactes.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="fr">
       <body>{children}</body>
     </html>
   );

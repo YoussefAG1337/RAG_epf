@@ -7,12 +7,13 @@ from typing import Any
 
 import pytest
 from pgvector.sqlalchemy import Vector
-from pydantic import SecretStr
 from sqlalchemy import CheckConstraint, UniqueConstraint
 
-from app.config import Settings
+from app.config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, Settings
 from app.models import Base
 from app.schema_guard import EmbeddingSchemaMismatchError, validate_embedding_schema
+
+VECTOR = f"vector({EMBEDDING_DIMENSIONS})"
 
 
 class FakeResult:
@@ -35,7 +36,10 @@ class FakeResult:
 
 class FakeConnection:
     def __init__(
-        self, model: str | None, dimensions: int | None, vector_type: str | None,
+        self,
+        model: str | None,
+        dimensions: int | None,
+        vector_type: str | None,
         provider_mismatches: int = 0,
     ) -> None:
         self.model = model
@@ -71,7 +75,7 @@ def test_models_include_course_scope_provenance_and_vector_contract() -> None:
     } <= set(chunks.columns.keys())
     embedding_type = chunks.c.embedding.type
     assert isinstance(embedding_type, Vector)
-    assert embedding_type.dim == 768
+    assert embedding_type.dim == EMBEDDING_DIMENSIONS
     assert any(isinstance(item, CheckConstraint) for item in chunks.constraints)
     assert any(
         isinstance(item, UniqueConstraint)
@@ -88,16 +92,18 @@ def test_startup_guard_accepts_matching_model_metadata_and_vector_column() -> No
     settings = Settings()
 
     validate_embedding_schema(
-        FakeConnection("gemini-embedding-2", 768, "vector(768)"),  # type: ignore[arg-type]
+        FakeConnection(EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, VECTOR),  # type: ignore[arg-type]
         settings,
     )
 
 
 def test_startup_guard_rejects_unverified_or_mismatched_document_vectors() -> None:
-    with pytest.raises(EmbeddingSchemaMismatchError, match="re-embed each unchanged PDF"):
+    with pytest.raises(
+        EmbeddingSchemaMismatchError, match="re-run ingestion with EMBEDDING_PROVIDER=local"
+    ):
         validate_embedding_schema(
-            FakeConnection("gemini-embedding-2", 768, "vector(768)", provider_mismatches=1),  # type: ignore[arg-type]
-            Settings(rag_provider="gemini", gemini_api_key=SecretStr("test-secret")),
+            FakeConnection(EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, VECTOR, provider_mismatches=1),  # type: ignore[arg-type]
+            Settings(embedding_provider="local"),
         )
 
 
@@ -105,8 +111,8 @@ def test_startup_guard_rejects_unverified_or_mismatched_document_vectors() -> No
     ("model", "dimensions", "vector_type", "message"),
     [
         (None, None, None, "metadata is missing"),
-        ("gemini-embedding-2", 384, "vector(384)", "does not match migrated metadata"),
-        ("gemini-embedding-2", 768, "vector(384)", "column does not match"),
+        ("other/model", EMBEDDING_DIMENSIONS, VECTOR, "does not match migrated metadata"),
+        (EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, "vector(384)", "column does not match"),
     ],
 )
 def test_startup_guard_rejects_missing_or_incompatible_database_schema(
@@ -136,8 +142,11 @@ def test_alembic_offline_migration_contains_required_schema_ddl() -> None:
     assert "create extension if not exists vector" in migration_sql
     assert "create table documents" in migration_sql
     assert "create table document_chunks" in migration_sql
-    assert "vector(768)" in migration_sql
+    assert VECTOR in migration_sql
     assert "ix_chunks_embedding_hnsw" in migration_sql
     assert "uq_chunks_document_position" in migration_sql
-    assert "gemini-embedding-2" in migration_sql
+    assert EMBEDDING_MODEL.lower() in migration_sql
+    assert "create table conversations" in migration_sql
+    assert "create table messages" in migration_sql
+    assert "locations" in migration_sql
     assert "embedding_provider" in migration_sql
