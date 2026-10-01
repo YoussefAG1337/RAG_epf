@@ -36,5 +36,3 @@ Thumbs.db
 
 # BMad renders immutable, content-addressed workflow snapshots on demand.
 _bmad/render/
-.agents/
-_bmad-output/
