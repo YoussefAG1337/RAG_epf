@@ -42,8 +42,10 @@ class GroqGenerationProvider:
         fallback_models: tuple[str, ...] = (),
         client: httpx.AsyncClient | None = None,
         stall_timeout: float = STALL_TIMEOUT_SECONDS,
+        temperature: float | None = None,
     ) -> None:
         self._api_key = api_key
+        self._temperature = temperature
         self._models = (model, *(item for item in fallback_models if item != model))
         self._client = client
         self._stall_timeout = stall_timeout
@@ -56,6 +58,8 @@ class GroqGenerationProvider:
         }
         if json_output:
             body["response_format"] = {"type": "json_object"}
+        if self._temperature is not None:
+            body["temperature"] = self._temperature
         return body
 
     def _can_fall_back(self, error: Exception, position: int) -> bool:

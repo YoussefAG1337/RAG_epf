@@ -40,16 +40,18 @@ class GeminiGenerationProvider:
         fallback_models: tuple[str, ...] = (),
         client: genai.Client | None = None,
         stall_timeout: float = STALL_TIMEOUT_SECONDS,
+        temperature: float | None = None,
     ) -> None:
         self._api_key = api_key
+        self._temperature = temperature
         self._models = (model, *(item for item in fallback_models if item != model))
         self._client = client
         self._stall_timeout = stall_timeout
 
-    @staticmethod
-    def _config(json_output: bool) -> types.GenerateContentConfig:
+    def _config(self, json_output: bool) -> types.GenerateContentConfig:
         return types.GenerateContentConfig(
-            response_mime_type="application/json" if json_output else "text/plain"
+            response_mime_type="application/json" if json_output else "text/plain",
+            temperature=self._temperature,
         )
 
     def _should_fall_back(self, error: errors.APIError, position: int) -> bool:

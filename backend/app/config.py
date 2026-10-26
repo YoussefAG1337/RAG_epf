@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # Comma-separated models tried in order when the answer model is overloaded (503) or
     # rate limited (429); empty disables. Free-tier demand spikes can hit several at once.
     answer_fallback_models: str = "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite"
+    # Low so that the same question gives (nearly) the same answer and evaluation runs are
+    # comparable; not 0, which Google advises against for Gemini 3 models (looping output).
+    answer_temperature: float = 0.2
     # Must match the model served by the embeddings container and the migrated vector column.
     embedding_model: str = EMBEDDING_MODEL
     embedding_dimensions: int = EMBEDDING_DIMENSIONS
@@ -95,6 +98,8 @@ class Settings(BaseSettings):
             self.groq_api_key is None or not self.groq_api_key.get_secret_value()
         ):
             raise ValueError("GROQ_API_KEY is required when ANSWER_PROVIDER=groq")
+        if not 0.0 <= self.answer_temperature <= 2.0:
+            raise ValueError("answer_temperature must be between 0 and 2")
         if self.retrieval_limit < 1:
             raise ValueError("retrieval_limit must be greater than zero")
         if self.evidence_minimum_score is not None and not (

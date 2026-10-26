@@ -1,5 +1,8 @@
+# Tested with torch 2.14.1, sentence-transformers 6.2.0, transformers 5.21.0,
+# fastapi 0.162.0 and uvicorn 0.54.0 (Python 3.12). Upper bounds keep a fresh install on
+# the same major versions.
 fastapi>=0.115,<1
 uvicorn[standard]>=0.32,<1
-torch>=2.4
+torch>=2.4,<3
 sentence-transformers>=5,<7
 transformers>=4.51,<6

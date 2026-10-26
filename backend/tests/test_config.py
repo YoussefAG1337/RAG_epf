@@ -97,6 +97,9 @@ def test_runtime_retrieval_settings_are_semantically_validated() -> None:
         IsolatedSettings(retrieval_limit=0)
     with pytest.raises(ValidationError, match="evidence_minimum_score"):
         IsolatedSettings(evidence_minimum_score=1.1)
+    with pytest.raises(ValidationError, match="answer_temperature"):
+        IsolatedSettings(answer_temperature=-0.1)
+    assert IsolatedSettings().answer_temperature == 0.2
 
 
 def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(

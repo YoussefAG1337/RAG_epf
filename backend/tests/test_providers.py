@@ -174,6 +174,28 @@ def test_gemini_asks_for_json_answers_and_plain_text_rewrites() -> None:
     ]
 
 
+def test_configured_temperature_is_sent_to_gemini_and_groq() -> None:
+    models = _Models()
+    client = type("Client", (), {"aio": type("Aio", (), {"models": models})()})()
+    gemini = GeminiGenerationProvider(SecretStr("test-only"), client=client, temperature=0.2)
+    asyncio.run(gemini.generate("prompt"))
+    assert models.calls[0][2].temperature == 0.2
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    groq = GroqGenerationProvider(
+        SecretStr("test-only"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        temperature=0.2,
+    )
+    asyncio.run(groq.generate("prompt"))
+    assert bodies[0]["temperature"] == 0.2
+
+
 def test_gemini_falls_back_when_the_primary_model_is_overloaded() -> None:
     overloaded = _Models(failures={"primary": 503})
     assert asyncio.run(_gemini(overloaded).generate("prompt")) == '{"claims": []}'

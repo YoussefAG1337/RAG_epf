@@ -44,12 +44,14 @@ def create_generation_provider(settings: Settings) -> GenerationProvider:
             settings.gemini_api_key,
             model=settings.answer_model,
             fallback_models=settings.fallback_answer_models,
+            temperature=settings.answer_temperature,
         )
     if settings.answer_provider == "groq":
         return GroqGenerationProvider(
             settings.groq_api_key,
             model=settings.answer_model,
             fallback_models=settings.fallback_answer_models,
+            temperature=settings.answer_temperature,
         )
     return DeterministicGenerationProvider()
 
