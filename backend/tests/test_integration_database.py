@@ -189,6 +189,30 @@ def test_narrow_scope_returns_every_in_scope_chunk_despite_the_hnsw_index(
         assert {item.course_id for item in found} == {"Petit"}
 
 
+def test_refusals_and_errors_are_not_given_to_the_model_as_history(
+    sessions: sessionmaker[Session],
+) -> None:
+    conversation_id, _ = start_or_continue(sessions, None, "Quel temps fait-il ?", {})
+    append_messages(
+        sessions,
+        conversation_id,
+        [
+            ("user", "Quel temps fait-il ?", {}),
+            ("assistant", "Je n'ai pas trouvé cette information…", {"status": "abstained"}),
+            ("user", "Comment fonctionne RSA ?", {}),
+            ("assistant", "RSA…", {"status": "answered"}),
+        ],
+    )
+
+    _, history = start_or_continue(sessions, conversation_id, "Et AES ?", {})
+
+    assert [(turn.role, turn.content) for turn in history] == [
+        ("user", "Quel temps fait-il ?"),
+        ("user", "Comment fonctionne RSA ?"),
+        ("assistant", "RSA…"),
+    ]
+
+
 def test_conversations_keep_ordered_messages_scope_and_can_be_renamed_and_deleted(
     sessions: sessionmaker[Session],
 ) -> None:

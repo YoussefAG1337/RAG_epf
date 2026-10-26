@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.ingestion import IngestionError, resolve_selected_file
 from app.models import Document
-from app.text_parsing import _cell_text
+from app.text_parsing import cell_text
 
 DocumentKind = Literal["pdf", "markdown", "text", "spreadsheet"]
 _MEDIA_TYPES: dict[DocumentKind, str] = {
@@ -122,7 +122,7 @@ def document_content(path: Path, kind: DocumentKind) -> DocumentContent:
                 for row_number, row in enumerate(
                     sheet.iter_rows(values_only=True), start=first_row
                 ):
-                    cells = [_cell_text(value) for value in row]
+                    cells = [cell_text(value) for value in row]
                     while cells and not cells[-1]:
                         cells.pop()
                     if cells:

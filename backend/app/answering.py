@@ -8,6 +8,7 @@ excerpt and mapped to the exact source lines, so the interface can highlight the
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -26,7 +27,10 @@ from app.providers.protocols import (
     EmbeddingProvider,
     GenerationProvider,
     ProviderUnavailableError,
+    StreamingGenerationProvider,
 )
+
+logger = logging.getLogger(__name__)
 
 EXCERPT_MARKER = "Extraits :\n"
 QUESTION_MARKER = "Dernière question :\n"
@@ -436,6 +440,7 @@ async def _condense(
             condensation_prompt(question, history), json_output=False
         )
     except Exception:
+        logger.warning("follow-up rewriting failed; searching the question as asked", exc_info=True)
         return question  # searching with the raw question beats failing
     rewritten = rewritten.strip().strip('"«» ').strip()
     return rewritten if 0 < len(rewritten) <= 500 else question
@@ -485,10 +490,9 @@ async def answer_events(
     book = _CitationBook(evidence)
     parser = _ClaimStreamParser()
     emitted = 0
-    stream = getattr(generation_provider, "generate_stream", None)
     try:
-        if stream is not None:
-            async for text in stream(prompt):
+        if isinstance(generation_provider, StreamingGenerationProvider):
+            async for text in generation_provider.generate_stream(prompt):
                 for raw in parser.feed(text):
                     if (claim := book.claim(raw)) is not None:
                         emitted += 1

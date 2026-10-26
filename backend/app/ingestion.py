@@ -30,9 +30,7 @@ from app.text_parsing import TextParsingError, parse_markdown, parse_xlsx
 
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 150
-EXPECTED_EMBEDDING_DIMENSIONS = EMBEDDING_DIMENSIONS
-# Gemini's free tier allows 100 embedded texts per minute; small batches let ingestion wait
-# out the quota window in steps instead of failing on one oversized request.
+# Passages sent to the embedding service per request (it batches them again on the device).
 EMBEDDING_BATCH_SIZE = 25
 # Bump when parsing or chunking changes so re-ingestion rebuilds existing documents.
 PARSER_VERSION = 5
@@ -585,10 +583,10 @@ async def ingest_document(
     except Exception as error:
         raise IngestionError("embedding provider failed; no records were written") from error
     for vector in vectors:
-        if len(vector) != EXPECTED_EMBEDDING_DIMENSIONS:
+        if len(vector) != EMBEDDING_DIMENSIONS:
             raise IngestionError(
                 "embedding provider returned "
-                f"{len(vector)} dimensions; expected {EXPECTED_EMBEDDING_DIMENSIONS}"
+                f"{len(vector)} dimensions; expected {EMBEDDING_DIMENSIONS}"
             )
         if not all(math.isfinite(value) for value in vector):
             raise IngestionError("embedding provider returned a non-finite vector value")

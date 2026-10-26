@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 
 ERROR_MESSAGE = "La réponse n'a pas pu être générée. Réessayez dans un instant."
 BUSY_MESSAGE = (
-    "Le service de rédaction des réponses est saturé (limite de l'offre gratuite Gemini). "
+    "Le service de rédaction des réponses est saturé (limite de l'offre gratuite). "
     "Réessayez dans une minute."
 )
 ABSTENTION_MESSAGE = (

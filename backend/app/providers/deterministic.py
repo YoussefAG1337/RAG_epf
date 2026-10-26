@@ -83,18 +83,20 @@ class DeterministicGenerationProvider:
     response: str | None = None
 
     async def generate(self, prompt: str, *, json_output: bool = True) -> str:
+        # Imported here: app.answering imports the providers package, so a module-level
+        # import would be circular.
+        from app.answering import EXCERPT_MARKER, QUESTION_MARKER
+
         if not prompt.strip():
             raise ValueError("generation prompt must not be empty")
         if not json_output:
-            marker = "Dernière question :\n"
-            return prompt.rsplit(marker, maxsplit=1)[-1].strip()
+            return prompt.rsplit(QUESTION_MARKER, maxsplit=1)[-1].strip()
         if self.response is not None:
             return self.response
-        marker = "Extraits :\n"
-        if marker not in prompt:
+        if EXCERPT_MARKER not in prompt:
             return json.dumps({"claims": []})
         try:
-            excerpts = json.loads(prompt.rsplit(marker, maxsplit=1)[1])
+            excerpts = json.loads(prompt.rsplit(EXCERPT_MARKER, maxsplit=1)[1])
             first = excerpts[0]
             label = first["id"]
             excerpt = first["extrait"]

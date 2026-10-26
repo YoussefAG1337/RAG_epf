@@ -113,7 +113,7 @@ def parse_markdown(data: bytes) -> ParsedDocument:
     )
 
 
-def _cell_text(value: object) -> str:
+def cell_text(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -149,7 +149,7 @@ def parse_xlsx(data: bytes) -> ParsedDocument:
             data_rows = 0
             first_row = sheet.min_row or 1
             for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=first_row):
-                cells = [_cell_text(value) for value in row]
+                cells = [cell_text(value) for value in row]
                 cells = [cell for cell in cells if cell]
                 if not cells:
                     continue

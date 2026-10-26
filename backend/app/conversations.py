@@ -75,11 +75,14 @@ def start_or_continue(
             .where(Message.conversation_id == conversation.id)
             .order_by(Message.position)
         ).all()
+        # Refusals and error messages say nothing about the course; they would only
+        # mislead follow-up rewriting and the answer prompt.
         history = [
             HistoryTurn(
                 role="user" if message.role == "user" else "assistant", content=message.content
             )
             for message in messages
+            if message.role == "user" or (message.payload or {}).get("status") == "answered"
         ]
         return conversation.id, history
 

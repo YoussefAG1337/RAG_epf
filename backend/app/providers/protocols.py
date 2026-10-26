@@ -1,7 +1,7 @@
 """Narrow asynchronous provider contracts."""
 
 from collections.abc import AsyncIterator
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -25,6 +25,7 @@ class GenerationProvider(Protocol):
     async def generate(self, prompt: str, *, json_output: bool = True) -> str: ...
 
 
+@runtime_checkable
 class StreamingGenerationProvider(GenerationProvider, Protocol):
     """A generation provider that can also yield its JSON response incrementally."""
 
