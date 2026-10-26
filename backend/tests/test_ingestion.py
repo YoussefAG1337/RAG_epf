@@ -169,8 +169,11 @@ class _FakeTransaction(AbstractContextManager[_FakeSession]):
             ]
             if self.session.document is not None:
                 old = next(
-                    (index for index, item in enumerate(self.factory.documents)
-                     if item.id == self.session.document.id),
+                    (
+                        index
+                        for index, item in enumerate(self.factory.documents)
+                        if item.id == self.session.document.id
+                    ),
                     None,
                 )
                 if old is None:
@@ -197,9 +200,7 @@ class _FakeSessionFactory:
         return _FakeSession(self)
 
 
-def _slides_pdf(
-    slides: Sequence[tuple[str | None, str]], *, footer: str | None = None
-) -> bytes:
+def _slides_pdf(slides: Sequence[tuple[str | None, str]], *, footer: str | None = None) -> bytes:
     """Create a 16:9 slide deck: large titles, wrapped body text, optional small footer."""
 
     document = pymupdf.open()
@@ -256,9 +257,10 @@ def test_chunking_is_deterministic_bounded_and_page_local() -> None:
     hard_split_text = "".join(chr(0x4E00 + index) for index in range(2600))
     hard_split_chunks = chunk_page_text(hard_split_text)
     assert [len(chunk) for chunk in hard_split_chunks] == [1000, 1000, 900]
-    assert hard_split_chunks[0][-DEFAULT_CHUNK_OVERLAP:] == hard_split_chunks[1][
-        :DEFAULT_CHUNK_OVERLAP
-    ]
+    assert (
+        hard_split_chunks[0][-DEFAULT_CHUNK_OVERLAP:]
+        == hard_split_chunks[1][:DEFAULT_CHUNK_OVERLAP]
+    )
 
 
 def test_ingest_extracts_text_pages_and_keeps_provenance(tmp_path: Path) -> None:
@@ -427,11 +429,8 @@ def test_provider_change_refuses_chunk_count_or_identity_mismatch(
 
     assert database.documents[0].embedding_provider == old_provider
     assert [
-        (chunk.id, chunk.chunk_position, chunk.text, chunk.embedding)
-        for chunk in database.chunks
-    ] == [
-        (chunk.id, chunk.chunk_position, chunk.text, chunk.embedding) for chunk in old_rows
-    ]
+        (chunk.id, chunk.chunk_position, chunk.text, chunk.embedding) for chunk in database.chunks
+    ] == [(chunk.id, chunk.chunk_position, chunk.text, chunk.embedding) for chunk in old_rows]
     if corruption == "count":
         assert len(database.chunks) == len(old_vectors) - 1
 

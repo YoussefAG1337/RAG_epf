@@ -102,9 +102,7 @@ class DocumentChunk(Base):
     locations: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default="[]"
     )
-    embedding: Mapped[list[float]] = mapped_column(
-        Vector(EMBEDDING_DIMENSIONS), nullable=False
-    )
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

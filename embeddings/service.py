@@ -37,8 +37,7 @@ CONVENTIONS: dict[str, Convention] = {
     "Qwen/Qwen3-Embedding-0.6B": Convention(query_prompt_name="query"),
     "intfloat/multilingual-e5-large-instruct": Convention(
         query_prefix=(
-            "Instruct: Given a student question, retrieve course passages that answer it\n"
-            "Query: "
+            "Instruct: Given a student question, retrieve course passages that answer it\nQuery: "
         )
     ),
     "intfloat/multilingual-e5-base": Convention(
@@ -123,9 +122,7 @@ def encode(texts: list[str], kind: Literal["query", "document"]) -> list[list[fl
     convention = CONVENTIONS.get(MODEL_NAME, Convention())
     prefix = convention.query_prefix if kind == "query" else convention.document_prefix
     prompt_name = (
-        convention.query_prompt_name
-        if kind == "query"
-        else convention.document_prompt_name
+        convention.query_prompt_name if kind == "query" else convention.document_prompt_name
     )
     keyword: dict[str, Any] = {"prompt_name": prompt_name} if prompt_name else {}
     with state.lock:

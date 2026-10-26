@@ -27,9 +27,7 @@ def _terms(text: str) -> list[str]:
     folded = unicodedata.normalize("NFKD", text.casefold())
     folded = "".join(character for character in folded if not unicodedata.combining(character))
     return [
-        token
-        for token in re.findall(r"\w+", folded)
-        if len(token) > 1 and token not in _STOPWORDS
+        token for token in re.findall(r"\w+", folded) if len(token) > 1 and token not in _STOPWORDS
     ]
 
 

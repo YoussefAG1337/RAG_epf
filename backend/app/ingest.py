@@ -157,9 +157,7 @@ async def _ingest(args: argparse.Namespace) -> int:
                 if not args.all:
                     raise
                 failures += 1
-                print(
-                    f"ingestion failed for {selection.selected_file}: {error}", file=sys.stderr
-                )
+                print(f"ingestion failed for {selection.selected_file}: {error}", file=sys.stderr)
                 continue
             _report(result, selection)
     finally:
@@ -174,13 +172,10 @@ async def _ingest(args: argparse.Namespace) -> int:
 def _report(result: IngestionResult, selection: CourseSelection) -> None:
     for page_number in result.empty_pages:
         print(
-            f"warning: {result.source_filename} page {page_number} "
-            "contains no extractable text",
+            f"warning: {result.source_filename} page {page_number} contains no extractable text",
             file=sys.stderr,
         )
-    replaced = (
-        f" replaced={result.replaced_documents}" if result.replaced_documents else ""
-    )
+    replaced = f" replaced={result.replaced_documents}" if result.replaced_documents else ""
     print(
         f"ingested {result.source_filename}: subject={selection.subject.strip()} "
         f"course={selection.course_id.strip()} "

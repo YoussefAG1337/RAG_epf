@@ -263,10 +263,7 @@ def _preferred_end(text: str, start: int, hard_end: int, chunk_size: int) -> int
         return line_end
 
     section = text[start:hard_end]
-    sentence_ends = [
-        start + match.end()
-        for match in re.finditer(r"[.!?][\"')\]]*\s+", section)
-    ]
+    sentence_ends = [start + match.end() for match in re.finditer(r"[.!?][\"')\]]*\s+", section)]
     valid_sentence_ends = [position for position in sentence_ends if position >= minimum]
     if valid_sentence_ends:
         return valid_sentence_ends[-1]
@@ -296,8 +293,10 @@ def chunk_page_text(
     start = 0
     while start < len(page_text):
         hard_end = min(start + chunk_size, len(page_text))
-        end = hard_end if hard_end == len(page_text) else _preferred_end(
-            page_text, start, hard_end, chunk_size
+        end = (
+            hard_end
+            if hard_end == len(page_text)
+            else _preferred_end(page_text, start, hard_end, chunk_size)
         )
         chunk = page_text[start:end]
         if chunk.strip():
@@ -570,7 +569,8 @@ async def ingest_document(
                     select(func.count())
                     .select_from(DocumentChunk)
                     .where(DocumentChunk.document_id == document_id)
-                ) or 0,
+                )
+                or 0,
                 empty_pages=(),
             )
     parsed, document_title, drafts, embedding_inputs = _prepare(

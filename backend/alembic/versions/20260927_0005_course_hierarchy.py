@@ -18,9 +18,7 @@ def upgrade() -> None:
         sa.Column("subject", sa.String(200), nullable=False, server_default="General"),
     )
     op.alter_column("documents", "subject", server_default=None)
-    op.create_check_constraint(
-        "ck_documents_subject_nonempty", "documents", "length(subject) > 0"
-    )
+    op.create_check_constraint("ck_documents_subject_nonempty", "documents", "length(subject) > 0")
     op.create_index("ix_documents_subject", "documents", ["subject"])
     op.add_column("documents", sa.Column("title", sa.String(512), nullable=True))
     op.add_column("document_chunks", sa.Column("section_title", sa.Text(), nullable=True))

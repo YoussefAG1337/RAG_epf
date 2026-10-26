@@ -21,7 +21,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "ck_documents_embedding_provider_nonempty", "documents", type_="check"
-    )
+    op.drop_constraint("ck_documents_embedding_provider_nonempty", "documents", type_="check")
     op.drop_column("documents", "embedding_provider")

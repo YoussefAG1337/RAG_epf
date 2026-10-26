@@ -23,9 +23,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint("ck_chunks_text_nonempty", "document_chunks", type_="check")
-    op.create_check_constraint(
-        "ck_chunks_text_nonempty", "document_chunks", "length(text) > 0"
-    )
+    op.create_check_constraint("ck_chunks_text_nonempty", "document_chunks", "length(text) > 0")
     op.drop_constraint("ck_documents_checksum_sha256_hex", "documents", type_="check")
     op.create_check_constraint(
         "ck_documents_checksum_sha256_length", "documents", "length(checksum) = 64"

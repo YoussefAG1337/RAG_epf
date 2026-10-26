@@ -113,10 +113,16 @@ def test_ingestion_tracks_sections_and_embeds_chunks_with_their_course_context(
 
 def test_document_title_falls_back_to_the_filename() -> None:
     assert title_from_filename("week-2/03_listes__chainees.pdf") == "03 listes chainees"
-    assert contextual_embedding_text(
-        subject="Maths", course_id="Analyse", document_title="Suites", section_title=None,
-        text="Une suite converge.",
-    ) == "Maths > Analyse > Suites\n\nUne suite converge."
+    assert (
+        contextual_embedding_text(
+            subject="Maths",
+            course_id="Analyse",
+            document_title="Suites",
+            section_title=None,
+            text="Une suite converge.",
+        )
+        == "Maths > Analyse > Suites\n\nUne suite converge."
+    )
 
 
 def test_only_real_section_dividers_start_a_section() -> None:
@@ -239,9 +245,7 @@ def test_slide_title_is_the_largest_text_even_below_large_bullets() -> None:
         page.insert_text((40, 60), title, fontsize=40)
         page.insert_text((40, 140), "- Statistiques descriptives", fontsize=24)
         page.insert_text((40, 180), "- Tests d'hypothèse", fontsize=24)
-        page.insert_textbox(
-            pymupdf.Rect(40, 220, 900, 500), "Texte courant " * 30, fontsize=18
-        )
+        page.insert_textbox(pymupdf.Rect(40, 220, 900, 500), "Texte courant " * 30, fontsize=18)
     parsed = parse_pdf(bytes(document.tobytes()))
 
     agenda = parsed.pages[0]

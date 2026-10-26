@@ -117,9 +117,12 @@ def test_cli_uses_the_local_embeddings_service_and_provider_can_be_overridden(
 
     engine = _Engine()
     monkeypatch.setattr(ingest, "create_database_engine", lambda _settings: engine)
-    assert ingest.main(
-        ["--course-id", "course-a", "--file", "lesson.pdf", "--provider", "deterministic"]
-    ) == 0
+    assert (
+        ingest.main(
+            ["--course-id", "course-a", "--file", "lesson.pdf", "--provider", "deterministic"]
+        )
+        == 0
+    )
     assert isinstance(selected[-1], DeterministicEmbeddingProvider)
     assert engine.disposed
     capsys.readouterr()

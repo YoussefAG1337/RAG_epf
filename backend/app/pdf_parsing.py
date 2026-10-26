@@ -118,9 +118,7 @@ def _line_text(spans: list[dict[str, Any]], size: float, baseline: float) -> str
 
 
 def _page_lines(page: Any) -> list[_Line]:
-    highlights = [
-        annotation.rect for annotation in page.annots(types=[_HIGHLIGHT_ANNOTATION])
-    ]
+    highlights = [annotation.rect for annotation in page.annots(types=[_HIGHLIGHT_ANNOTATION])]
     lines: list[_Line] = []
     content = page.get_text("dict", sort=True)
     for block_index, block in enumerate(content.get("blocks", [])):
@@ -335,9 +333,7 @@ def _segments(
         )
         for heading, body in groups
     ]
-    titled = bool(
-        groups and groups[0][0] and groups[0][0][0].top <= height * TITLE_TOP_FRACTION
-    )
+    titled = bool(groups and groups[0][0] and groups[0][0][0].top <= height * TITLE_TOP_FRACTION)
     return [segment for segment in segments if segment.heading_path or segment.text], titled
 
 
