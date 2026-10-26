@@ -12,7 +12,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 from alembic.config import Config
@@ -22,7 +22,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
-from app.answering import Scope, answer_question, list_courses, list_documents
+from app.answering import Scope, _retrieve, answer_question, list_courses, list_documents
 from app.config import Settings
 from app.conversations import (
     append_messages,
@@ -33,6 +33,7 @@ from app.conversations import (
     start_or_continue,
 )
 from app.ingestion import ingest_document
+from app.models import Document, DocumentChunk
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
@@ -135,6 +136,57 @@ def test_ingested_markdown_is_listed_retrieved_and_cited_with_line_numbers(
                 settings=_settings(tmp_path),
             )
         )
+
+
+def test_narrow_scope_returns_every_in_scope_chunk_despite_the_hnsw_index(
+    sessions: sessionmaker[Session],
+) -> None:
+    # pgvector's HNSW index filters *after* collecting its candidates, so a scope that is a
+    # small share of the corpus could come back short if the planner chose the index. A
+    # scoped search must return what an exact search returns, whichever plan is used.
+    embedder = DeterministicEmbeddingProvider(dimensions=Settings().embedding_dimensions)
+    small_document = uuid5(NAMESPACE_URL, "regression/small")
+    with sessions.begin() as session:
+        for course, document_id, count in (
+            ("Grand", uuid5(NAMESPACE_URL, "regression/large"), 300),
+            ("Petit", small_document, 5),
+        ):
+            session.add(
+                Document(
+                    id=document_id,
+                    subject="Général",
+                    course_id=course,
+                    source_filename=f"{course}/cours.md",
+                    checksum="0" * 64,
+                    page_count=1,
+                    embedding_provider="deterministic",
+                )
+            )
+            session.flush()
+            for position in range(count):
+                content = f"{course} chapitre {position} chiffrement clé publique"
+                session.add(
+                    DocumentChunk(
+                        document_id=document_id,
+                        course_id=course,
+                        physical_page_number=1,
+                        chunk_position=position,
+                        text=content,
+                        embedding=asyncio.run(embedder.embed(content)),
+                    )
+                )
+    query = asyncio.run(embedder.embed("Grand chapitre 7 chiffrement"))
+
+    for scope in (Scope(course_id="Petit"), Scope(document_id=small_document)):
+        found = _retrieve(
+            session_factory=sessions,
+            scope=scope,
+            query_embedding=query,
+            limit=8,
+            minimum_score=-1.0,
+        )
+        assert len(found) == 5
+        assert {item.course_id for item in found} == {"Petit"}
 
 
 def test_conversations_keep_ordered_messages_scope_and_can_be_renamed_and_deleted(
