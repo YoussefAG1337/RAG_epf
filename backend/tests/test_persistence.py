@@ -3,7 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pgvector.sqlalchemy import Vector
@@ -28,10 +28,10 @@ class FakeResult:
         return self._row
 
     def scalar_one_or_none(self) -> str | None:
-        return self._scalar
+        return cast(str | None, self._scalar)
 
     def scalar_one(self) -> int:
-        return self._scalar
+        return cast(int, self._scalar)
 
 
 class FakeConnection:

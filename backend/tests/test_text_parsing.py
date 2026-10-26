@@ -5,6 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook
 
 from app import ingest
@@ -122,7 +123,7 @@ def test_preview_handles_every_supported_format(tmp_path: Path) -> None:
 
 
 def test_dry_run_prints_chunks_without_touching_the_database(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / "Stats").mkdir()
     (tmp_path / "Stats" / "fiche.md").write_text("# Fiche\n## Variance\nMoyenne des carrés.")

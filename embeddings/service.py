@@ -112,7 +112,10 @@ def _load() -> None:
     state.device = device
     # Small batches pad less; on Apple GPUs batch 8 was fastest (31 s vs 50 s at 64).
     state.batch_size = int(BATCH_SIZE_OVERRIDE or (8 if device == "mps" else 16))
-    dimension = getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
+    # sentence-transformers renamed the method; support the versions before and after.
+    dimension = (
+        getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
+    )
     state.dimensions = int(dimension() or 0)
 
 

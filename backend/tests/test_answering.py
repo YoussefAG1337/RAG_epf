@@ -85,7 +85,7 @@ class _Sessions:
                 return None
 
             def execute(self, statement: Any) -> Any:
-                compiled = statement.compile(dialect=postgresql.dialect())
+                compiled = statement.compile(dialect=cast(Any, postgresql).dialect())
                 sessions.sql = str(compiled)
                 sessions.params = dict(compiled.params)
                 rows = sorted(sessions.rows, key=lambda row: getattr(row, "distance", 0))

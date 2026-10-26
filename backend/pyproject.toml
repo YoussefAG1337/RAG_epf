@@ -47,3 +47,5 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
+# PyMuPDF ships without type annotations; calling it is expected, not an omission.
+untyped_calls_exclude = ["pymupdf"]

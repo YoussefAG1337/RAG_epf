@@ -154,7 +154,7 @@ def _gemini(
         SecretStr("test-only"),
         model="primary",
         fallback_models=fallbacks,
-        client=client,  # type: ignore[arg-type]
+        client=client,
     )
 
 
@@ -237,7 +237,7 @@ def test_gemini_moves_on_when_a_model_stops_responding() -> None:
         SecretStr("test-only"),
         model="primary",
         fallback_models=("fallback",),
-        client=client,  # type: ignore[arg-type]
+        client=client,
         stall_timeout=0.05,
     )
     assert asyncio.run(collect(provider)) == '{"claims": []}'
@@ -246,7 +246,7 @@ def test_gemini_moves_on_when_a_model_stops_responding() -> None:
     only = GeminiGenerationProvider(
         SecretStr("test-only"),
         model="primary",
-        client=type("Client", (), {"aio": type("Aio", (), {"models": Stalling()})()})(),  # type: ignore[arg-type]
+        client=type("Client", (), {"aio": type("Aio", (), {"models": Stalling()})()})(),
         stall_timeout=0.05,
     )
     with pytest.raises(ProviderUnavailableError, match="stopped responding"):

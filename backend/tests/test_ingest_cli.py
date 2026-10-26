@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, NoReturn
 from uuid import UUID
 
 import pytest
@@ -23,7 +24,7 @@ class _Engine:
 
 
 def test_cli_uses_configured_source_and_deterministic_provider_by_default(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     settings = Settings(pdf_source_dir=tmp_path)
     engine = _Engine()
@@ -42,7 +43,7 @@ def test_cli_uses_configured_source_and_deterministic_provider_by_default(
     monkeypatch.setattr(ingest, "create_database_engine", lambda actual: engine)
     monkeypatch.setattr(ingest, "create_session_factory", lambda actual: session_factory)
 
-    async def fake_ingest_document(**kwargs):
+    async def fake_ingest_document(**kwargs: Any) -> IngestionResult:
         captured.update(kwargs)
         return result
 
@@ -67,13 +68,13 @@ def test_cli_uses_configured_source_and_deterministic_provider_by_default(
 
 
 def test_cli_returns_nonzero_and_disposes_engine_on_ingestion_error(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     engine = _Engine()
     monkeypatch.setattr(ingest, "get_settings", lambda: Settings(pdf_source_dir=tmp_path))
     monkeypatch.setattr(ingest, "create_database_engine", lambda settings: engine)
 
-    async def fail_ingestion(**kwargs):
+    async def fail_ingestion(**kwargs: Any) -> NoReturn:
         raise IngestionError("selected PDF is missing")
 
     monkeypatch.setattr(ingest, "ingest_document", fail_ingestion)
@@ -88,7 +89,7 @@ def test_cli_returns_nonzero_and_disposes_engine_on_ingestion_error(
 
 
 def test_cli_uses_the_local_embeddings_service_and_provider_can_be_overridden(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     settings = Settings(pdf_source_dir=tmp_path, embedding_provider="local")
     engine = _Engine()
@@ -97,7 +98,7 @@ def test_cli_uses_the_local_embeddings_service_and_provider_can_be_overridden(
     monkeypatch.setattr(ingest, "create_session_factory", lambda _engine: object())
     selected: list[object] = []
 
-    async def fake_ingest_document(**kwargs):
+    async def fake_ingest_document(**kwargs: Any) -> IngestionResult:
         selected.append(kwargs["embedding_provider"])
         return IngestionResult(
             document_id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -124,10 +125,12 @@ def test_cli_uses_the_local_embeddings_service_and_provider_can_be_overridden(
     capsys.readouterr()
 
 
-def test_cli_reports_invalid_configuration_clearly(monkeypatch, capsys) -> None:
+def test_cli_reports_invalid_configuration_clearly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    def missing_key_settings():
+    def missing_key_settings() -> Settings:
         return Settings(answer_provider="gemini")
 
     monkeypatch.setattr(ingest, "get_settings", missing_key_settings)
@@ -142,7 +145,7 @@ def test_cli_reports_invalid_configuration_clearly(monkeypatch, capsys) -> None:
 
 
 def test_cli_all_ingests_every_course_folder_and_reports_failures(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / "Info" / "course-a").mkdir(parents=True)
     (tmp_path / "Info" / "course-a" / "one.pdf").write_bytes(b"%PDF")
@@ -153,9 +156,9 @@ def test_cli_all_ingests_every_course_folder_and_reports_failures(
     monkeypatch.setattr(ingest, "get_settings", lambda: Settings(pdf_source_dir=tmp_path))
     monkeypatch.setattr(ingest, "create_database_engine", lambda _settings: engine)
     monkeypatch.setattr(ingest, "create_session_factory", lambda _engine: object())
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str]] = []
 
-    async def fake_ingest_document(**kwargs):
+    async def fake_ingest_document(**kwargs: Any) -> IngestionResult:
         calls.append((kwargs["subject"], kwargs["course_id"], kwargs["selected_file"]))
         if kwargs["selected_file"].endswith("broken.pdf"):
             raise IngestionError("PDF contains no usable searchable text")
@@ -183,7 +186,7 @@ def test_cli_all_ingests_every_course_folder_and_reports_failures(
     assert "skipped loose.pdf" in output.err
 
 
-def test_cli_single_file_requires_course_id(capsys) -> None:
+def test_cli_single_file_requires_course_id(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         ingest.main(["--subject", "Info", "--file", "lesson.pdf"])
     assert "--course-id is required" in capsys.readouterr().err

@@ -106,7 +106,7 @@ def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(
     with pytest.raises(ValidationError, match="GEMINI_API_KEY"):
         IsolatedSettings(answer_provider="gemini")
     with pytest.raises(ValidationError, match="embedding_provider"):
-        IsolatedSettings(embedding_provider="gemini")  # type: ignore[arg-type]
+        IsolatedSettings(embedding_provider="gemini")
     assert IsolatedSettings(answer_provider="deterministic").answer_provider == "deterministic"
 
 
