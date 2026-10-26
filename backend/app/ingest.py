@@ -23,8 +23,7 @@ from app.ingestion import (
     ingest_document,
     preview_document,
 )
-from app.providers.deterministic import DeterministicEmbeddingProvider
-from app.providers.local import LocalEmbeddingProvider
+from app.providers import close_provider, create_embedding_provider
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -138,17 +137,8 @@ def _dry_run(args: argparse.Namespace) -> int:
 
 async def _ingest(args: argparse.Namespace) -> int:
     settings = get_settings()
-    selected_provider = args.provider or settings.embedding_provider
     engine = create_database_engine(settings)
-    provider: DeterministicEmbeddingProvider | LocalEmbeddingProvider = (
-        DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
-        if selected_provider == "deterministic"
-        else LocalEmbeddingProvider(
-            settings.embedding_url,
-            model=settings.embedding_model,
-            dimensions=settings.embedding_dimensions,
-        )
-    )
+    provider = create_embedding_provider(settings, args.provider)
     try:
         session_factory = create_session_factory(engine)
         selections = _selections(args, settings.pdf_source_dir)
@@ -173,8 +163,7 @@ async def _ingest(args: argparse.Namespace) -> int:
                 continue
             _report(result, selection)
     finally:
-        if isinstance(provider, LocalEmbeddingProvider):
-            await provider.aclose()
+        await close_provider(provider)
         engine.dispose()
 
     if args.all:

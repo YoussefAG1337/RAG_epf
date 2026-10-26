@@ -48,14 +48,13 @@ from app.documents import (
     get_document,
     media_type,
 )
-from app.providers.deterministic import (
-    DeterministicEmbeddingProvider,
-    DeterministicGenerationProvider,
+from app.providers import (
+    EmbeddingProvider,
+    GenerationProvider,
+    close_provider,
+    create_embedding_provider,
+    create_generation_provider,
 )
-from app.providers.gemini import GeminiGenerationProvider
-from app.providers.groq import GroqGenerationProvider
-from app.providers.local import LocalEmbeddingProvider
-from app.providers.protocols import EmbeddingProvider, GenerationProvider
 from app.schema_guard import validate_embedding_schema
 from app.stream_contract import (
     AbstentionEvent,
@@ -121,22 +120,6 @@ def _line(event: BaseModel) -> str:
     return event.model_dump_json() + "\n"
 
 
-def _generation_provider(settings: Settings) -> GenerationProvider:
-    if settings.answer_provider == "gemini":
-        return GeminiGenerationProvider(
-            settings.gemini_api_key,
-            model=settings.answer_model,
-            fallback_models=settings.fallback_answer_models,
-        )
-    if settings.answer_provider == "groq":
-        return GroqGenerationProvider(
-            settings.groq_api_key,
-            model=settings.answer_model,
-            fallback_models=settings.fallback_answer_models,
-        )
-    return DeterministicGenerationProvider()
-
-
 def create_app(
     *,
     schema_guard: Callable[[Connection, Settings], None] | None = validate_embedding_schema,
@@ -162,16 +145,8 @@ def create_app(
 
     def providers(settings: Settings) -> tuple[EmbeddingProvider, GenerationProvider]:
         if "embedding" not in shared:
-            shared["embedding"] = embedding_provider or (
-                LocalEmbeddingProvider(
-                    settings.embedding_url,
-                    model=settings.embedding_model,
-                    dimensions=settings.embedding_dimensions,
-                )
-                if settings.embedding_provider == "local"
-                else DeterministicEmbeddingProvider(settings.embedding_dimensions)
-            )
-            shared["generation"] = generation_provider or _generation_provider(settings)
+            shared["embedding"] = embedding_provider or create_embedding_provider(settings)
+            shared["generation"] = generation_provider or create_generation_provider(settings)
         return shared["embedding"], shared["generation"]
 
     @asynccontextmanager
@@ -188,19 +163,11 @@ def create_app(
                     engine.dispose()
             yield
         finally:
-            generation = shared.get("generation")
-            if generation is not None and generation_provider is None:
-                aclose = getattr(generation, "aclose", None)
-                close = getattr(generation, "close", None)
-                if aclose is not None:
-                    await aclose()
-                elif close is not None:
-                    close()
-            embedding = shared.get("embedding")
-            if embedding is not None and embedding_provider is None:
-                aclose = getattr(embedding, "aclose", None)
-                if aclose is not None:
-                    await aclose()
+            # Injected providers belong to the caller (tests), which closes them.
+            if generation_provider is None:
+                await close_provider(shared.get("generation"))
+            if embedding_provider is None:
+                await close_provider(shared.get("embedding"))
             if "engine" in shared:
                 shared["engine"].dispose()
             shared.clear()

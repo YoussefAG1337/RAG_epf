@@ -1,6 +1,6 @@
 """Measure retrieval (and optionally answers) on questions with known source passages.
 
-    uv run --project backend python -m app.evaluate            # retrieval only, no Gemini
+    uv run --project backend python -m app.evaluate            # retrieval only, no LLM
     uv run --project backend python -m app.evaluate --answers  # also generate answers
 
 Retrieval reports where the right passage ranks and how relevant and off-topic questions
@@ -26,9 +26,7 @@ from app.answering import (
 )
 from app.config import get_settings
 from app.db import create_database_engine, create_session_factory
-from app.providers.deterministic import DeterministicEmbeddingProvider
-from app.providers.gemini import GeminiGenerationProvider
-from app.providers.local import LocalEmbeddingProvider
+from app.providers import close_provider, create_embedding_provider, create_generation_provider
 
 QUESTIONS = Path(__file__).resolve().parents[1] / "eval" / "questions.json"
 DEPTH = 8
@@ -44,15 +42,9 @@ async def run(with_answers: bool) -> int:
     data = json.loads(QUESTIONS.read_text(encoding="utf-8"))
     engine = create_database_engine(settings)
     sessions = create_session_factory(engine)
-    embedder: Any = (
-        LocalEmbeddingProvider(
-            settings.embedding_url,
-            model=settings.embedding_model,
-            dimensions=settings.embedding_dimensions,
-        )
-        if settings.embedding_provider == "local"
-        else DeterministicEmbeddingProvider(settings.embedding_dimensions)
-    )
+    if not data["questions"] or not data["off_topic"]:
+        raise SystemExit(f"{QUESTIONS} needs both answerable and off-topic questions")
+    embedder = create_embedding_provider(settings)
     ranks: list[int | None] = []
     target_scores: list[float] = []
     try:
@@ -111,21 +103,15 @@ async def run(with_answers: bool) -> int:
         if with_answers:
             await _answers(data, settings, sessions, embedder)
     finally:
-        aclose = getattr(embedder, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        await close_provider(embedder)
         engine.dispose()
     return 0
 
 
 async def _answers(data: dict[str, Any], settings: Any, sessions: Any, embedder: Any) -> None:
-    generator = GeminiGenerationProvider(
-        settings.gemini_api_key,
-        model=settings.answer_model,
-        fallback_models=settings.fallback_answer_models,
-    )
-    answered = abstained = failed = quotes = verified = 0
-    print("\nAnswers:")
+    generator = create_generation_provider(settings)
+    answered = refused = failed = quotes = verified = 0
+    print(f"\nAnswers ({settings.answer_provider}, {settings.answer_model}):")
     try:
         cases = [(item["question"], True) for item in data["questions"]]
         cases += [(question, False) for question in data["off_topic"]]
@@ -140,31 +126,36 @@ async def _answers(data: dict[str, Any], settings: Any, sessions: Any, embedder:
                     settings=settings,
                 )
             except (NoEvidenceError, UnsupportedQuestionError):
-                abstained += 1
                 if answerable:
                     print(f"  ABSTAINED  {question[:60]!r}")
+                else:
+                    refused += 1
                 continue
             except AnsweringError as error:
                 failed += 1
                 print(f"  ERROR      {question[:60]!r}: {error}")
                 continue
-            answered += 1
             if not answerable:
                 print(f"  ANSWERED OFF-TOPIC  {question[:60]!r}")
+                continue
+            answered += 1
             for citation in answer.citations:
                 quotes += 1
                 verified += bool(citation.quotes)
     finally:
-        generator.close()
+        await close_provider(generator)
     print(
-        f"  answered {answered}, abstained {abstained}, errors {failed}; "
-        f"citations with a verified quote {verified}/{quotes}"
+        f"  answerable questions answered {answered}/{len(data['questions'])}   "
+        f"off-topic refused {refused}/{len(data['off_topic'])}   errors {failed}\n"
+        f"  citations of answers with a verified quote {verified}/{quotes}"
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m app.evaluate", description=__doc__)
-    parser.add_argument("--answers", action="store_true", help="also generate answers (Gemini)")
+    parser.add_argument(
+        "--answers", action="store_true", help="also generate answers (ANSWER_PROVIDER)"
+    )
     args = parser.parse_args()
     return asyncio.run(run(args.answers))
 
