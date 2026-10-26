@@ -8,7 +8,13 @@ from pydantic_settings import SettingsConfigDict
 from pytest import MonkeyPatch
 from sqlalchemy.engine import make_url
 
-from app.config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, LOCAL_MINIMUM_SCORE, Settings
+from app.config import (
+    EMBEDDING_DIMENSIONS,
+    EMBEDDING_MODEL,
+    ENV_FILE,
+    LOCAL_MINIMUM_SCORE,
+    Settings,
+)
 
 
 class IsolatedSettings(Settings):
@@ -27,7 +33,7 @@ def test_settings_have_offline_defaults(monkeypatch: MonkeyPatch) -> None:
         "deterministic",
         "deterministic",
     )
-    assert settings.pdf_source_dir == Path("data/course-pdfs")
+    assert settings.pdf_source_dir == ENV_FILE.parent / "data/course-pdfs"
     assert settings.gemini_api_key is None
 
 
@@ -48,6 +54,33 @@ def test_database_url_encodes_reserved_password_characters() -> None:
 
     assert make_url(settings.database_url).password == "pa@ss:/?#%"
     assert "pa%40ss%3A%2F%3F%23%25" in settings.database_url
+
+
+def test_database_credentials_are_read_from_the_postgres_names_in_env(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POSTGRES_DB", "cours")
+    monkeypatch.setenv("POSTGRES_USER", "etudiant")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+    settings = IsolatedSettings()
+    assert (settings.database_name, settings.database_user) == ("cours", "etudiant")
+    assert settings.database_password.get_secret_value() == "secret"
+
+    # The API container is given DATABASE_* explicitly; those win.
+    monkeypatch.setenv("DATABASE_NAME", "course_rag")
+    assert IsolatedSettings().database_name == "course_rag"
+
+
+def test_env_file_and_course_folder_are_found_wherever_commands_run() -> None:
+    assert ENV_FILE.is_absolute()
+    assert (ENV_FILE.parent / "compose.yaml").is_file()
+    # A relative PDF_SOURCE_DIR is relative to the repository root, as .env.example says.
+    assert IsolatedSettings(pdf_source_dir=Path("cours")).pdf_source_dir == (
+        ENV_FILE.parent / "cours"
+    )
+    assert IsolatedSettings(pdf_source_dir=Path("/course-files")).pdf_source_dir == Path(
+        "/course-files"
+    )
 
 
 def test_embedding_dimensions_are_locked_to_the_migrated_vector_column() -> None:

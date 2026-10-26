@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -16,20 +16,36 @@ EMBEDDING_DIMENSIONS = 1024
 # are the lowest), most off-topic questions <= 0.35. Borderline excerpts that pass are still
 # refused by the answer model when they do not answer the question.
 LOCAL_MINIMUM_SCORE = 0.40
+# The repository's .env, whichever directory a command is started from. Containers have no
+# such file: compose.yaml passes their settings as environment variables.
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
     """Environment-backed application settings with safe local defaults."""
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore", env_parse_none_str=""
+        env_file=ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+        env_parse_none_str="",
+        populate_by_name=True,
     )
 
     database_host: str = "localhost"
     database_port: int = 5432
-    database_name: str = "course_rag"
-    database_user: str = "course_rag"
-    database_password: SecretStr = SecretStr("local-development-only")
+    # .env names the database credentials POSTGRES_* (as the database container expects);
+    # commands run on the host read them under that name too.
+    database_name: str = Field(
+        "course_rag", validation_alias=AliasChoices("DATABASE_NAME", "POSTGRES_DB")
+    )
+    database_user: str = Field(
+        "course_rag", validation_alias=AliasChoices("DATABASE_USER", "POSTGRES_USER")
+    )
+    database_password: SecretStr = Field(
+        SecretStr("local-development-only"),
+        validation_alias=AliasChoices("DATABASE_PASSWORD", "POSTGRES_PASSWORD"),
+    )
     pdf_source_dir: Path = Path("data/course-pdfs")
     gemini_api_key: SecretStr | None = None
     groq_api_key: SecretStr | None = None
@@ -55,6 +71,13 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000,http://127.0.0.1:3000"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+
+    @field_validator("pdf_source_dir")
+    @classmethod
+    def resolve_source_dir(cls, value: Path) -> Path:
+        """A relative course folder is relative to the repository root, not to the shell."""
+
+        return value if value.is_absolute() else ENV_FILE.parent / value
 
     @model_validator(mode="after")
     def validate_runtime_values(self) -> "Settings":
