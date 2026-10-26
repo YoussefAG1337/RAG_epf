@@ -13,7 +13,7 @@ A question-answering assistant for university courses. Students ask questions in
 - **Scoped questions.** Ask across all courses, one subject, one course, or a single document (open it from the library and ask about it).
 - **Conversations.** Saved automatically, renamed or deleted from the list; follow-up questions ("Et pour AES ?") are understood in context.
 - **Real course formats.** Beamer and PowerPoint slides, exercise sheets, QCMs whose answers are highlighted in the PDF, Markdown summaries with LaTeX formulas, Excel workbooks — each parsed with dedicated rules.
-- **Runs locally and for free.** The embedding model runs on the user's machine (on the GPU on Apple Silicon); answers are written by Gemini on its free tier, with automatic fallback between models.
+- **Runs locally and for free.** The embedding model runs on the user's machine (on the GPU on Apple Silicon); answers are written by Gemini on its free tier (or by Groq), with automatic fallback between models.
 
 ## How it works
 
@@ -28,7 +28,7 @@ Question: rewrite follow-up ─► embed ─► 8 closest chunks in scope ─►
 | Embeddings | Qwen3-Embedding-0.6B (sentence-transformers, PyTorch on Apple GPU / CUDA / CPU) | Turns passages and questions into 1024-dimension vectors |
 | Vector database | PostgreSQL 16 + pgvector (HNSW index, cosine distance) | Stores documents, chunks, vectors, source positions, conversations |
 | API | Python 3.12, FastAPI, SQLAlchemy, Alembic, PyMuPDF | Import, retrieval, answering, conversations, document files |
-| Answers | Gemini 3.8 Flash (+ fallbacks) | Writes the answer from the retrieved excerpts |
+| Answers | Gemini 3.8 Flash (+ fallbacks), or models served by Groq; temperature 0.2 | Writes the answer from the retrieved excerpts |
 | Interface | Next.js 15, React 19, Tailwind CSS, react-pdf (pdf.js), KaTeX | French web app: library, chat, document viewer |
 
 **Every design choice — the parsing rules, the chunk size, why this embedding model (benchmarked on the course material), why PostgreSQL rather than a dedicated vector database, the exact LLM prompt and the reason for each instruction, and the measured thresholds — is explained in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).**
@@ -49,10 +49,10 @@ Measured on the EPF course material (Cryptographie, Statistiques, Virtualisation
 
 ## Quick start
 
-Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/), [`uv`](https://docs.astral.sh/uv/) (`brew install uv`), and a [Gemini API key](https://aistudio.google.com/apikey) (free tier).
+Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/), [`uv`](https://docs.astral.sh/uv/) (`brew install uv`), and a [Gemini API key](https://aistudio.google.com/apikey) (free tier) or a [Groq API key](https://console.groq.com/keys).
 
 ```sh
-cp .env.example .env        # set GEMINI_API_KEY; set DATABASE_PORT=5433 if 5432 is taken
+cp .env.example .env        # set GEMINI_API_KEY (or ANSWER_PROVIDER=groq and GROQ_API_KEY); set DATABASE_PORT=5433 if 5432 is taken
 ./start.sh                  # embedding model on the GPU, then database, API, and web app in Docker
 uv run --project backend python -m app.ingest --all     # import the courses
 ```
@@ -101,7 +101,7 @@ backend/            FastAPI application (Python)
     conversations.py  saved conversations
     documents.py      document files and line-numbered views for the viewer
     main.py           HTTP API
-    providers/        local embeddings client, Gemini answers, offline test doubles
+    providers/        provider factories, local embeddings client, Gemini and Groq answers, offline test doubles
     evaluate.py       retrieval and answer evaluation
   alembic/          database migrations
   eval/             evaluation questions with their expected sources
@@ -118,36 +118,41 @@ start.sh / stop.sh  start and stop everything
 
 ## Configuration
 
-All settings are in `.env` (see `.env.example`). The most useful:
+All settings are in `.env` at the repository root (see `.env.example`); commands find it from any directory, and a relative `PDF_SOURCE_DIR` is relative to the repository root. The most useful:
 
 | Setting | Meaning |
 |---|---|
-| `GEMINI_API_KEY` | Key used to write answers |
+| `ANSWER_PROVIDER` | `gemini` (default) or `groq` |
+| `GEMINI_API_KEY`, `GROQ_API_KEY` | Key of the answer provider |
 | `PDF_SOURCE_DIR` | Folder containing the course material |
 | `DATABASE_PORT` | Host port for PostgreSQL (change it if 5432 is used by another PostgreSQL) |
-| `ANSWER_MODEL`, `ANSWER_FALLBACK_MODELS` | Gemini models, tried in order when one is overloaded or rate limited |
+| `ANSWER_MODEL`, `ANSWER_FALLBACK_MODELS` | Answer models, tried in order when one is overloaded or rate limited |
+| `ANSWER_TEMPERATURE` | Answer model temperature (default 0.2: nearly the same answer each time) |
 | `EVIDENCE_MINIMUM_SCORE` | Relevance cutoff (empty: the measured default, 0.40) |
 | `RETRIEVAL_LIMIT` | Number of excerpts given to the model (default 8) |
 
 ## Quality checks
 
 ```sh
-uv run --project backend --extra dev pytest backend/tests           # 112 tests
+uv run --project backend --extra dev pytest backend/tests           # 129 tests
 uv run --project backend --extra dev ruff check backend embeddings
-uv run --project backend --extra dev mypy backend/app backend/tests
+uv run --project backend --extra dev ruff format --check backend embeddings
+uv run --project backend --extra dev mypy backend/app backend/tests   # strict
 uv run --project backend python -m app.evaluate [--answers]         # retrieval / answer quality
 cd frontend && npm test -- --run && npm run lint && npm run typecheck && npm run build   # 24 tests
 cd frontend && npm run e2e      # real-browser check of the running app (Chrome, Brave, Edge…)
 ```
 
-Backend integration tests create and drop a throwaway `course_rag_test` database when PostgreSQL is running (they never touch your data) and are skipped otherwise.
+Backend integration tests (4) create and drop a throwaway `course_rag_test` database when PostgreSQL is reachable on `TEST_DATABASE_PORT` (default 5433; set it to your `DATABASE_PORT`). They never touch your data and are skipped when no server is reachable.
 
 ## Limitations
 
 - Images are not read: diagram-only slides contribute only their title, and scanned PDFs need OCR first.
 - Excel files are indexed by their text rows (hypotheses, rules, labelled results), not their numerical data.
 - There is no authentication: the app is meant for one user on one machine.
-- Answer time depends on Gemini's free tier: typically 7–15 s; up to about a minute when a model stalls (after 30 s without a response the next model takes over). When every model is busy, the app asks to retry in a minute.
+- Deleting a course file does not remove it from the index: its passages can still be cited (and its viewer link fails) until the database is rebuilt. Changed files are replaced correctly.
+- Answers can still vary slightly between runs (temperature 0.2), so answer metrics move by a question or two between evaluations; retrieval metrics are deterministic.
+- Answer time depends on the provider's free tier (Gemini): typically 7–15 s; up to about a minute when a model stalls (after 30 s without a response the next model takes over). When every model is busy, the app asks to retry in a minute.
 
 ## Troubleshooting
 
@@ -156,4 +161,4 @@ Backend integration tests create and drop a throwaway `course_rag_test` database
 | "Serveur injoignable" in the interface | The API is starting or stopped; the page retries by itself. `docker compose ps` shows service health. |
 | Import or answers fail with `EmbeddingServiceError` | Run `./start.sh` (it waits until the model is loaded); see `.run/embeddings.log`. |
 | Port 5432 already in use | Another PostgreSQL runs on the machine: set `DATABASE_PORT=5433` in `.env`. |
-| "Le service de rédaction des réponses est saturé" | Gemini's free tier is busy; retry after a minute. |
+| "Le service de rédaction des réponses est saturé" | The answer provider's free tier is busy or its quota is used up; retry after a minute. |

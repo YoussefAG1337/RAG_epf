@@ -112,7 +112,7 @@ Courses are folders: `cours/<course>/files` or `cours/<subject>/<course>/files`.
 
 ### 4.4 Chunking
 
-Each segment (a slide, an exercise, a QCM question, a Markdown section, a sheet) is split into chunks by **packing whole lines** up to about **1,000 characters**, with up to **150 characters** of trailing lines repeated in the next chunk.
+Each segment (a slide, an exercise, a QCM question, a Markdown section, a sheet) is split into chunks by **packing whole lines** up to about **1,000 characters**, with up to **150 characters** of trailing lines repeated in the next chunk (so a chunk that starts with repeated lines can reach about 1,150 characters).
 
 *Why segments first:* a slide or an exercise is a natural unit of meaning; cutting by a fixed number of characters would mix the end of one topic with the start of another. *Why ~1,000 characters (~250 tokens):* long enough to hold a slide or an exercise with its context, short enough that one chunk is about one idea (a precise embedding) and that 8 chunks fit comfortably in the prompt. *Why whole lines:* a bullet or a table row cut in half loses its meaning. *Why overlap:* a sentence that spans two chunks stays findable from both. A chunk that starts inside a Markdown table repeats the table's header rows, so its columns stay interpretable.
 
@@ -187,11 +187,12 @@ Measured on an Apple M4 Pro, embedding the 364 chunks:
 
 ## 6. Vector database
 
-**Choice: PostgreSQL 16 with the pgvector extension**, HNSW index on cosine distance.
+**Choice: PostgreSQL 16 with the pgvector extension** (0.8.6, image pinned), HNSW index on cosine distance.
 
 *Why PostgreSQL rather than a dedicated vector database (Qdrant, Chroma, Pinecone, Weaviate):*
 - The data is relational as much as vectorial: subjects, courses, documents, chunks, conversations, messages. One database keeps them consistent with foreign keys and transactions (a changed file's old chunks are deleted and new ones inserted atomically).
 - **Scope filters are plain SQL** (`WHERE course_id = …`) applied in the same query as the vector ranking, before the limit — so a course-scoped question can never be answered from another course.
+- *Checked:* pgvector's HNSW index applies `WHERE` filters after collecting its candidates (40 by default), which could return fewer than 8 excerpts for a narrow scope. On the course material, `EXPLAIN ANALYZE` shows that scoped queries use the B-tree index on the course or document and an exact sort, and their results equal an exact search; the index serves unscoped queries. An integration test (300 vs 5 chunks) guards this. If the corpus grows to where the planner prefers HNSW for scoped queries, `SET LOCAL hnsw.iterative_scan = relaxed_order` (pgvector ≥ 0.8) is the fix.
 - The corpus is small (hundreds to thousands of chunks); pgvector's HNSW index is more than fast enough, and one fewer service is simpler to run and to explain.
 - Pinecone would add an external cloud dependency; Chroma/Qdrant would duplicate document metadata in a second store.
 
@@ -220,7 +221,9 @@ The index `ix_chunks_embedding_hnsw` uses `vector_cosine_ops`. Cosine similarity
 
 ## 8. Answer generation and the LLM prompt
 
-**Model: Gemini 3.8 Flash**, with fallbacks `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`.
+**Model: Gemini 3.8 Flash**, with fallbacks `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`. `ANSWER_PROVIDER=groq` uses Groq's OpenAI-compatible API instead, with the same prompt, streaming, and fallback behaviour.
+
+**Temperature 0.2** (`ANSWER_TEMPERATURE`): the same question gives nearly the same answer, so evaluation runs are comparable. It is not 0 because Google advises against very low temperatures for Gemini 3 models, which can make them loop.
 
 *Why Gemini Flash:* free tier available to students, fast, good in French, supports JSON output and streaming. *Why fallbacks:* on the free tier, models regularly answer "503 high demand" or "429 rate limited"; the next model is tried automatically. Models were chosen by testing which ones the API key can actually use (the Gemini 2.5 family, although listed, returns "not available to new users"). A model that accepts a request but sends nothing for 30 seconds is also skipped: end-to-end testing caught the free tier leaving a stream open indefinitely, which would otherwise leave the student waiting forever. When all models are busy or stalled, the user sees a specific "service saturé, réessayez dans une minute" message.
 
@@ -330,17 +333,18 @@ French, three panes:
 **Answers** (`--answers`, same questions + 5 off-topic): 28 of 30 answerable questions answered; all 5 off-topic questions refused; 41 of 41 citations with a verified quote. The two misses: a question whose only material is spreadsheet rows (the model refused rather than extrapolate) and one generation that failed when every Gemini model was busy.
 
 **Automated tests**:
-- Backend: 112 tests (parsing on generated PDFs, chunking, locating, quote verification, answering, API, providers), including integration tests that create a throwaway PostgreSQL database, apply the migrations, import a document, and query it.
+- Backend: 129 tests (parsing on generated PDFs, chunking, locating, prompt construction, retrieval cutoff, quote verification, answering, API, providers, configuration), including 4 integration tests that create a throwaway PostgreSQL database, apply the migrations, import a document, query it in a narrow scope, and check conversation history.
 - Frontend: 24 tests (stream contract validation, chat state, inline math rendering, the workspace flows).
 - Browser: an end-to-end script drives a real Chromium browser through the interface (ask, open a citation and check the highlight boxes and the panel layout, follow-up, reload, document scope, Markdown citation visible, off-topic refusal, no console errors) — 12/12 checks.
-- Lint and type checks: ruff, mypy (strict), ESLint, TypeScript.
+- Lint, format and type checks: ruff (lint and format), mypy (strict), ESLint, TypeScript.
 
 ## 15. Limitations and future work
 
 - **Images are not read**: diagram-only slides contribute only their title; scanned PDFs need OCR. A vision model could describe diagrams at import time.
 - **Spreadsheets** are indexed only by their text rows; numerical data is not queried.
 - **Single user**: no authentication; all conversations are shared on one machine.
-- **Free tier**: answer generation depends on Gemini's quotas; heavy use needs a paid key or a local LLM.
+- **Deleted files**: removing a course file does not remove its passages from the index; only changed files are replaced. A synchronisation step (delete documents whose file is gone) is the next step.
+- **Free tier**: answer generation depends on the provider's quotas; heavy use needs a paid key or a local LLM. A full `--answers` evaluation (35 questions) can exhaust the Gemini free tier's per-minute quota, which shows up as errors, not as wrong answers.
 - **Evaluation size**: 30 questions give a useful signal but not statistical certainty; the question set should grow with the courses (`backend/eval/questions.json`).
 - **Keyword search**: a hybrid search (BM25 + vectors) could help exact terms such as course codes.
 

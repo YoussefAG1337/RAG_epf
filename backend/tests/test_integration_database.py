@@ -1,8 +1,8 @@
 """Integration tests against a real PostgreSQL + pgvector (skipped when unavailable).
 
 A throwaway ``<name>_test`` database is created, migrated with Alembic, and dropped, so
-the developer's data is never touched. Point DATABASE_HOST/DATABASE_PORT at a running
-server (for example the Compose database) to run them.
+the developer's data is never touched. Point TEST_DATABASE_HOST/TEST_DATABASE_PORT at a
+running server (for example the Compose database) to run them.
 """
 
 from __future__ import annotations
