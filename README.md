@@ -6,6 +6,8 @@ A question-answering assistant for university courses. Students ask questions in
 
 ![An answer with numbered sources; the cited passage is highlighted in the summary sheet](docs/images/citation.png)
 
+**Presentation:** the project slides are on [Canva](https://canva.link/4g1q5ajhto9na79).
+
 ## What it does
 
 - **Answers from the course only.** Retrieval-augmented generation (RAG): relevant passages are retrieved from the imported courses, and the language model may only use them. If nothing relevant exists, the assistant says so instead of guessing.
