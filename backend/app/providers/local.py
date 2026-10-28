@@ -79,3 +79,42 @@ class LocalEmbeddingProvider:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+
+class LocalRerankProvider:
+    """Rerank passages with the cross-encoder served next to the embedding model."""
+
+    def __init__(self, url: str, *, model: str, client: httpx.AsyncClient | None = None) -> None:
+        self._url = url.rstrip("/")
+        self._model = model
+        self._client = client
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        if not documents:
+            return []
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+        try:
+            response = await self._client.post(
+                f"{self._url}/rerank", json={"query": query, "documents": documents}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise EmbeddingServiceError(
+                f"reranking at {self._url} failed: {type(error).__name__}"
+            ) from error
+        body = response.json()
+        if body.get("model") != self._model:
+            raise EmbeddingServiceError(
+                f"model service reranks with {body.get('model')!r}, expected {self._model!r}; "
+                "set the same RERANK_MODEL for the service and the API"
+            )
+        scores = body.get("scores") or []
+        if len(scores) != len(documents):
+            raise EmbeddingServiceError("reranking returned the wrong number of scores")
+        return [float(score) for score in scores]
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None

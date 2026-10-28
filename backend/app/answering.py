@@ -1,6 +1,9 @@
-"""Scoped retrieval and grounded, quote-verified answer generation.
+"""Scoped hybrid retrieval and grounded, quote-verified answer generation.
 
-The model receives numbered excerpts (S1, S2, ...) and must answer with short claims, each
+Retrieval is hybrid: a vector search (meaning) and a keyword search (exact terms such as
+acronyms and algorithm names) together propose candidates, a cross-encoder reranker reads
+the question with each candidate, and the final order fuses the vector and reranker
+rankings. The model receives numbered excerpts (S1, S2, ...) and must answer with short claims, each
 citing excerpts by label together with a verbatim quote. Quotes are checked against the
 excerpt and mapped to the exact source lines, so the interface can highlight them.
 """
@@ -10,8 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from uuid import UUID
 
@@ -27,6 +31,7 @@ from app.providers.protocols import (
     EmbeddingProvider,
     GenerationProvider,
     ProviderUnavailableError,
+    RerankProvider,
     StreamingGenerationProvider,
 )
 
@@ -98,8 +103,9 @@ class Evidence:
     source_filename: str
     page: int
     excerpt: str
-    score: float
+    score: float  # cosine similarity to the question
     locations: list[dict[str, Any]] = field(default_factory=list)
+    rerank_score: float | None = None  # cross-encoder relevance, 0..1, when reranked
 
 
 class Highlight(BaseModel):
@@ -158,18 +164,13 @@ class DocumentSummary(BaseModel):
     page_count: int
 
 
-def _retrieve(
-    *,
-    session_factory: sessionmaker[Session],
-    scope: Scope,
-    query_embedding: list[float],
-    limit: int,
-    minimum_score: float,
-) -> list[Evidence]:
-    """Filter to the scope in SQL before cosine ranking and limiting."""
+# Reciprocal rank fusion constant: 60 is the usual value; it keeps one list's top results
+# from drowning out a passage that both searches rank well.
+RRF_K = 60
 
-    distance = DocumentChunk.embedding.cosine_distance(query_embedding)
-    statement = select(
+
+def _chunk_select(distance: Any) -> Any:
+    return select(
         DocumentChunk.id,
         DocumentChunk.document_id,
         DocumentChunk.course_id,
@@ -186,6 +187,11 @@ def _retrieve(
         (Document.id == DocumentChunk.document_id)
         & (Document.course_id == DocumentChunk.course_id),
     )
+
+
+def _in_scope(statement: Any, scope: Scope) -> Any:
+    """Filter to the scope in SQL, before ranking and limiting."""
+
     if scope.course_id is not None:
         statement = statement.where(
             DocumentChunk.course_id == scope.course_id, Document.course_id == scope.course_id
@@ -194,32 +200,184 @@ def _retrieve(
         statement = statement.where(Document.subject == scope.subject)
     if scope.document_id is not None:
         statement = statement.where(DocumentChunk.document_id == scope.document_id)
-    statement = statement.order_by(distance).limit(limit)
-    with session_factory() as session:
-        rows = session.execute(statement).all()
+    return statement
 
-    evidence: list[Evidence] = []
-    for row in rows:
-        score = 1.0 - float(row.distance)
-        if not math.isfinite(score) or score < minimum_score:
-            continue
-        evidence.append(
-            Evidence(
-                label=len(evidence) + 1,
-                chunk_id=row.id,
-                document_id=row.document_id,
-                subject=row.subject,
-                course_id=row.course_id,
-                document_title=row.title,
-                section_title=row.section_title,
-                source_filename=row.source_filename,
-                page=row.physical_page_number,
-                excerpt=row.text,
-                score=score,
-                locations=list(row.locations or []),
-            )
+
+def _vector_rows(
+    session_factory: sessionmaker[Session], scope: Scope, query_embedding: list[float], limit: int
+) -> list[Any]:
+    distance = DocumentChunk.embedding.cosine_distance(query_embedding)
+    statement = _in_scope(_chunk_select(distance), scope).order_by(distance).limit(limit)
+    with session_factory() as session:
+        return list(session.execute(statement).all())
+
+
+def keyword_query(text: str) -> str | None:
+    """A PostgreSQL ``to_tsquery`` matching any of the question's words.
+
+    Only word characters are kept, so user text cannot inject query syntax; French stop
+    words are dropped and the rest stemmed by PostgreSQL.
+    """
+
+    words = [word for word in re.findall(r"\w+", text) if len(word) > 1]
+    return " | ".join(dict.fromkeys(words)) or None
+
+
+def _keyword_rows(
+    session_factory: sessionmaker[Session],
+    scope: Scope,
+    query: str,
+    query_embedding: list[float],
+    limit: int,
+) -> list[Any]:
+    terms = keyword_query(query)
+    if terms is None:
+        return []
+    tsquery = func.to_tsquery("french", terms)
+    rank = func.ts_rank(DocumentChunk.search_vector, tsquery)
+    distance = DocumentChunk.embedding.cosine_distance(query_embedding)
+    statement = (
+        _in_scope(_chunk_select(distance), scope)
+        .where(DocumentChunk.search_vector.op("@@")(tsquery))
+        .order_by(rank.desc(), DocumentChunk.id)
+        .limit(limit)
+    )
+    with session_factory() as session:
+        return list(session.execute(statement).all())
+
+
+def fuse_rankings(
+    rankings: list[list[UUID]], *, tie_break: dict[UUID, float] | None = None, k: int = RRF_K
+) -> list[UUID]:
+    """Reciprocal rank fusion: order ids by the sum of 1 / (k + rank) over the rankings.
+
+    Equal sums (two rankings that disagree on a pair) are ordered by ``tie_break``, highest
+    first, when given.
+    """
+
+    scores: dict[UUID, float] = {}
+    for ranking in rankings:
+        for rank, chunk_id in enumerate(ranking):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+    ties = tie_break or {}
+    return sorted(
+        scores, key=lambda chunk_id: (-round(scores[chunk_id], 12), -ties.get(chunk_id, 0.0))
+    )
+
+
+def _to_evidence(rows: list[Any], rerank_scores: list[float | None]) -> list[Evidence]:
+    return [
+        Evidence(
+            label=index + 1,
+            chunk_id=row.id,
+            document_id=row.document_id,
+            subject=row.subject,
+            course_id=row.course_id,
+            document_title=row.title,
+            section_title=row.section_title,
+            source_filename=row.source_filename,
+            page=row.physical_page_number,
+            excerpt=row.text,
+            score=1.0 - float(row.distance),
+            locations=list(row.locations or []),
+            rerank_score=rerank_score,
         )
-    return evidence
+        for index, (row, rerank_score) in enumerate(zip(rows, rerank_scores, strict=True))
+    ]
+
+
+def _retrieve(
+    *,
+    session_factory: sessionmaker[Session],
+    scope: Scope,
+    query_embedding: list[float],
+    limit: int,
+    minimum_score: float,
+) -> list[Evidence]:
+    """Vector search only: the closest chunks in the scope by cosine similarity."""
+
+    rows = _vector_rows(session_factory, scope, query_embedding, limit)
+    kept = [
+        row
+        for row in rows
+        if math.isfinite(1.0 - float(row.distance)) and 1.0 - float(row.distance) >= minimum_score
+    ]
+    return _to_evidence(kept, [None] * len(kept))
+
+
+def _rerank_text(row: Any) -> str:
+    """What the reranker reads: where the passage comes from, then the passage."""
+
+    where = " > ".join(
+        part
+        for part in (row.course_id, row.title or row.source_filename, row.section_title)
+        if part
+    )
+    return f"{where}\n{row.text}"
+
+
+async def hybrid_candidates(
+    *,
+    session_factory: sessionmaker[Session],
+    scope: Scope,
+    query: str,
+    query_embedding: list[float],
+    settings: Settings,
+    reranker: RerankProvider | None,
+) -> list[Evidence]:
+    """Every candidate in final order, before any relevance cutoff.
+
+    The vector and keyword searches each propose ``retrieval_candidates`` chunks. With a
+    reranker, it scores all of them and the final order fuses the vector and reranker
+    rankings: the keyword search contributes candidates the vector search missed, and
+    the vector vote cushions the reranker's weaker cross-language judgments (measured in
+    docs/ARCHITECTURE.md). Without a reranker, the vector and keyword rankings are fused.
+    """
+
+    vector = _vector_rows(session_factory, scope, query_embedding, settings.retrieval_candidates)
+    keyword = (
+        _keyword_rows(session_factory, scope, query, query_embedding, settings.retrieval_candidates)
+        if settings.keyword_search
+        else []
+    )
+    rows_by_id = {row.id: row for row in [*vector, *keyword]}
+    vector_order = [row.id for row in vector]
+    if reranker is None:
+        order = fuse_rankings([vector_order, [row.id for row in keyword]])
+        return _to_evidence([rows_by_id[chunk_id] for chunk_id in order], [None] * len(order))
+    pool = list(rows_by_id.values())
+    try:
+        scores = await reranker.rerank(query, [_rerank_text(row) for row in pool])
+    except Exception as error:
+        raise AnsweringError("reranking failed") from error
+    rerank_scores = {row.id: score for row, score in zip(pool, scores, strict=True)}
+    rerank_order = sorted(rerank_scores, key=lambda chunk_id: -rerank_scores[chunk_id])
+    order = fuse_rankings([vector_order, rerank_order], tie_break=rerank_scores)
+    return _to_evidence(
+        [rows_by_id[chunk_id] for chunk_id in order], [rerank_scores[i] for i in order]
+    )
+
+
+def select_evidence(
+    candidates: list[Evidence], *, limit: int, minimum_score: float, rerank_minimum_score: float
+) -> list[Evidence]:
+    """The best ``limit`` relevant candidates, relabelled S1, S2, ... in order.
+
+    Reranked: nothing when even the best candidate scores below ``rerank_minimum_score``
+    (the question is not about the course), else the candidates that pass either the
+    reranker or the cosine cutoff. Not reranked: the candidates that pass the cosine cutoff.
+    """
+
+    reranked = [item.rerank_score for item in candidates if item.rerank_score is not None]
+    if reranked and max(reranked) < rerank_minimum_score:
+        return []
+    kept = [
+        item
+        for item in candidates
+        if (math.isfinite(item.score) and item.score >= minimum_score)
+        or (item.rerank_score is not None and item.rerank_score >= rerank_minimum_score)
+    ][:limit]
+    return [replace(item, label=index + 1) for index, item in enumerate(kept)]
 
 
 def _history_text(history: list[HistoryTurn]) -> str:
@@ -455,6 +613,7 @@ async def answer_events(
     embedding_provider: EmbeddingProvider,
     generation_provider: GenerationProvider,
     settings: Settings,
+    rerank_provider: RerankProvider | None = None,
 ) -> AsyncIterator[AnswerEvent]:
     """Yield the search query, then each validated claim as it is generated, then the
     citations. Raises NoEvidenceError/UnsupportedQuestionError when it should abstain."""
@@ -475,12 +634,19 @@ async def answer_events(
     ):
         raise AnsweringError("question embedding has an unexpected shape")
 
-    evidence = _retrieve(
+    candidates = await hybrid_candidates(
         session_factory=session_factory,
         scope=normalized_scope,
+        query=retrieval_query,
         query_embedding=query_embedding,
+        settings=settings,
+        reranker=rerank_provider,
+    )
+    evidence = select_evidence(
+        candidates,
         limit=settings.retrieval_limit,
         minimum_score=settings.minimum_score,
+        rerank_minimum_score=settings.rerank_cutoff,
     )
     if not evidence:
         raise NoEvidenceError("no sufficiently relevant evidence was found")
@@ -524,6 +690,7 @@ async def answer_question(
     generation_provider: GenerationProvider,
     settings: Settings,
     history: list[HistoryTurn] | None = None,
+    rerank_provider: RerankProvider | None = None,
 ) -> GroundedAnswer:
     """Non-streaming convenience wrapper around ``answer_events``."""
 
@@ -538,6 +705,7 @@ async def answer_question(
         embedding_provider=embedding_provider,
         generation_provider=generation_provider,
         settings=settings,
+        rerank_provider=rerank_provider,
     ):
         if event.kind == "retrieved" and event.retrieval_query:
             retrieval_query = event.retrieval_query

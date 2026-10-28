@@ -22,7 +22,14 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
-from app.answering import Scope, _retrieve, answer_question, list_courses, list_documents
+from app.answering import (
+    Scope,
+    _retrieve,
+    answer_question,
+    hybrid_candidates,
+    list_courses,
+    list_documents,
+)
 from app.config import Settings
 from app.conversations import (
     append_messages,
@@ -37,6 +44,7 @@ from app.models import Document, DocumentChunk
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
+    DeterministicRerankProvider,
 )
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -187,6 +195,67 @@ def test_narrow_scope_returns_every_in_scope_chunk_despite_the_hnsw_index(
         )
         assert len(found) == 5
         assert {item.course_id for item in found} == {"Petit"}
+
+
+def test_keyword_search_finds_exact_terms_in_scope_and_feeds_the_reranker(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    # The keyword index is a generated column: ingestion never writes it.
+    (tmp_path / "Virtualisation").mkdir()
+    (tmp_path / "Virtualisation" / "qcm.md").write_text(
+        "# QCM\n\n## Question 4\n\nvMotion déplace une machine virtuelle sans l'arrêter.\n\n"
+        "## Question 5\n\nUn snapshot fige l'état d'une machine virtuelle.\n",
+        encoding="utf-8",
+    )
+    # Vectors that ignore wording: only the keyword search can tell the passages apart.
+    embedder = _ConstantEmbedder()
+    asyncio.run(
+        ingest_document(
+            source_directory=tmp_path,
+            selected_file="Virtualisation/qcm.md",
+            subject="Général",
+            course_id="Virtualisation",
+            session_factory=sessions,
+            embedding_provider=embedder,
+        )
+    )
+    settings = Settings(retrieval_candidates=8)
+    query = asyncio.run(embedder.embed("vMotion"))
+
+    def search(scope: Scope, reranker: DeterministicRerankProvider | None) -> list[str]:
+        found = asyncio.run(
+            hybrid_candidates(
+                session_factory=sessions,
+                scope=scope,
+                query="à quoi sert vMotion ?",
+                query_embedding=query,
+                settings=settings,
+                reranker=reranker,
+            )
+        )
+        return [item.section_title or "" for item in found]
+
+    assert search(Scope(course_id="Virtualisation"), None)[0] == "Question 4"
+    reranked = asyncio.run(
+        hybrid_candidates(
+            session_factory=sessions,
+            scope=Scope(course_id="Virtualisation"),
+            query="à quoi sert vMotion ?",
+            query_embedding=query,
+            settings=settings,
+            reranker=DeterministicRerankProvider(),
+        )
+    )
+    assert reranked[0].section_title == "Question 4" and reranked[0].rerank_score
+    assert search(Scope(course_id="Cryptographie"), None) == []
+
+
+class _ConstantEmbedder:
+    async def embed(self, text: str) -> list[float]:
+        return [1.0] + [0.0] * (Settings().embedding_dimensions - 1)
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(text) for text in texts]
 
 
 def test_refusals_and_errors_are_not_given_to_the_model_as_history(

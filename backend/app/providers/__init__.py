@@ -1,4 +1,4 @@
-"""Providers: local embeddings, Gemini or Groq answers, and offline test doubles.
+"""Providers: local embeddings and reranking, Gemini or Groq answers, and offline doubles.
 
 The factories below are the one place that turns settings into providers, so the API,
 the ingestion command, and the evaluation always use the same configuration.
@@ -10,15 +10,17 @@ from app.config import Settings
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
+    DeterministicRerankProvider,
 )
 from app.providers.gemini import GeminiGenerationProvider
 from app.providers.groq import GroqGenerationProvider
-from app.providers.local import LocalEmbeddingProvider
+from app.providers.local import LocalEmbeddingProvider, LocalRerankProvider
 from app.providers.protocols import (
     EmbeddingProvider,
     GenerationProvider,
     ProviderConfigurationError,
     ProviderUnavailableError,
+    RerankProvider,
 )
 
 
@@ -34,6 +36,16 @@ def create_embedding_provider(
             dimensions=settings.embedding_dimensions,
         )
     return DeterministicEmbeddingProvider(settings.embedding_dimensions)
+
+
+def create_rerank_provider(settings: Settings) -> RerankProvider | None:
+    """The configured reranker (RERANK_PROVIDER), or None to keep the hybrid search order."""
+
+    if settings.reranker == "local":
+        return LocalRerankProvider(settings.embedding_url, model=settings.rerank_model)
+    if settings.reranker == "deterministic":
+        return DeterministicRerankProvider()
+    return None
 
 
 def create_generation_provider(settings: Settings) -> GenerationProvider:
@@ -71,14 +83,18 @@ async def close_provider(provider: Any) -> None:
 __all__ = [
     "DeterministicEmbeddingProvider",
     "DeterministicGenerationProvider",
+    "DeterministicRerankProvider",
     "EmbeddingProvider",
     "GeminiGenerationProvider",
     "GenerationProvider",
     "GroqGenerationProvider",
     "LocalEmbeddingProvider",
+    "LocalRerankProvider",
     "ProviderConfigurationError",
     "ProviderUnavailableError",
+    "RerankProvider",
     "close_provider",
     "create_embedding_provider",
     "create_generation_provider",
+    "create_rerank_provider",
 ]

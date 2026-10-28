@@ -29,6 +29,7 @@ services:
       context: ./embeddings
     environment:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      RERANK_MODEL: ${RERANK_MODEL-BAAI/bge-reranker-v2-m3}
       # Passages encoded at once; smaller uses less memory (default 16 on CPU).
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-}
     # On a shared server, the kernel otherwise kills whichever process it picks.
@@ -58,6 +59,9 @@ services:
       # Native service started by ./start.sh on the host (default), or the Docker one.
       EMBEDDING_URL: ${API_EMBEDDING_URL:-http://host.docker.internal:8081}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      RERANK_PROVIDER: ${RERANK_PROVIDER:-auto}
+      RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      RERANK_MINIMUM_SCORE: ${RERANK_MINIMUM_SCORE:-}
       ANSWER_PROVIDER: ${ANSWER_PROVIDER:-gemini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}

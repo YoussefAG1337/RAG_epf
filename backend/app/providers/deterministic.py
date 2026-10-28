@@ -105,3 +105,14 @@ class DeterministicGenerationProvider:
             {"claims": [{"text": excerpt, "sources": [{"id": label, "quote": quote}]}]},
             ensure_ascii=False,
         )
+
+
+@dataclass(frozen=True)
+class DeterministicRerankProvider:
+    """Score passages by the share of the question's informative terms they contain."""
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        wanted = set(_terms(query))
+        if not wanted:
+            return [0.0 for _ in documents]
+        return [len(wanted & set(_terms(document))) / len(wanted) for document in documents]

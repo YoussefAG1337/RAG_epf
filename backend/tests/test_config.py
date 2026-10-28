@@ -13,6 +13,7 @@ from app.config import (
     EMBEDDING_MODEL,
     ENV_FILE,
     LOCAL_MINIMUM_SCORE,
+    LOCAL_RERANK_MINIMUM_SCORE,
     Settings,
 )
 
@@ -111,6 +112,19 @@ def test_gemini_mode_requires_a_server_key_and_provider_mode_is_explicit(
     with pytest.raises(ValidationError, match="embedding_provider"):
         IsolatedSettings(embedding_provider="gemini")
     assert IsolatedSettings(answer_provider="deterministic").answer_provider == "deterministic"
+
+
+def test_reranker_follows_the_embedding_provider_unless_configured() -> None:
+    assert IsolatedSettings().reranker == "deterministic"
+    local = IsolatedSettings(embedding_provider="local")
+    assert local.reranker == "local"
+    assert local.rerank_cutoff == LOCAL_RERANK_MINIMUM_SCORE
+    assert IsolatedSettings(embedding_provider="local", rerank_provider="none").reranker == "none"
+    assert IsolatedSettings(rerank_minimum_score=0.2).rerank_cutoff == 0.2
+    with pytest.raises(ValidationError, match="retrieval_candidates"):
+        IsolatedSettings(retrieval_candidates=4)  # fewer than the 8 excerpts to keep
+    with pytest.raises(ValidationError, match="rerank_minimum_score"):
+        IsolatedSettings(rerank_minimum_score=2.0)
 
 
 def test_minimum_score_defaults_by_provider_unless_configured() -> None:

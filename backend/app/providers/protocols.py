@@ -19,6 +19,12 @@ class EmbeddingProvider(Protocol):
     async def embed(self, text: str) -> list[float]: ...
 
 
+class RerankProvider(Protocol):
+    """Score how well each passage answers the question, from 0 (unrelated) to 1."""
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]: ...
+
+
 class GenerationProvider(Protocol):
     """Generate one response from a complete prompt (JSON unless ``json_output=False``)."""
 

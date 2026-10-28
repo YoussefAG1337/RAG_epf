@@ -51,9 +51,11 @@ from app.documents import (
 from app.providers import (
     EmbeddingProvider,
     GenerationProvider,
+    RerankProvider,
     close_provider,
     create_embedding_provider,
     create_generation_provider,
+    create_rerank_provider,
 )
 from app.schema_guard import validate_embedding_schema
 from app.stream_contract import (
@@ -127,6 +129,7 @@ def create_app(
     session_factory: sessionmaker[Session] | None = None,
     embedding_provider: EmbeddingProvider | None = None,
     generation_provider: GenerationProvider | None = None,
+    rerank_provider: RerankProvider | None = None,
     settings_factory: Callable[[], Settings] = get_settings,
 ) -> FastAPI:
     """Build the API with injectable storage, providers, and startup schema check."""
@@ -143,11 +146,14 @@ def create_app(
             shared["sessions"] = create_session_factory(shared["engine"])
         return cast(sessionmaker[Session], shared["sessions"])
 
-    def providers(settings: Settings) -> tuple[EmbeddingProvider, GenerationProvider]:
+    def providers(
+        settings: Settings,
+    ) -> tuple[EmbeddingProvider, GenerationProvider, RerankProvider | None]:
         if "embedding" not in shared:
             shared["embedding"] = embedding_provider or create_embedding_provider(settings)
             shared["generation"] = generation_provider or create_generation_provider(settings)
-        return shared["embedding"], shared["generation"]
+            shared["rerank"] = rerank_provider or create_rerank_provider(settings)
+        return shared["embedding"], shared["generation"], shared["rerank"]
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncGenerator[None]:
@@ -168,6 +174,8 @@ def create_app(
                 await close_provider(shared.get("generation"))
             if embedding_provider is None:
                 await close_provider(shared.get("embedding"))
+            if rerank_provider is None:
+                await close_provider(shared.get("rerank"))
             if "engine" in shared:
                 shared["engine"].dispose()
             shared.clear()
@@ -299,7 +307,7 @@ def create_app(
             retrieval_query = question
             status: Literal["answered", "abstained", "error"] = "answered"
             error_message = ERROR_MESSAGE
-            embedding, generation = providers(settings)
+            embedding, generation, rerank = providers(settings)
             try:
                 async for event in answer_events(
                     question=question,
@@ -309,6 +317,7 @@ def create_app(
                     embedding_provider=embedding,
                     generation_provider=generation,
                     settings=settings,
+                    rerank_provider=rerank,
                 ):
                     line = _event_line(event, len(claims), question)
                     if event.kind == "retrieved" and event.retrieval_query:

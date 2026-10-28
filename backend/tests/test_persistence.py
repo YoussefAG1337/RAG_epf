@@ -85,7 +85,9 @@ def test_models_include_course_scope_provenance_and_vector_contract() -> None:
     assert {index.name for index in chunks.indexes} == {
         "ix_chunks_course_id",
         "ix_chunks_embedding_hnsw",
+        "ix_chunks_search_vector",
     }
+    assert chunks.c.search_vector.computed is not None  # filled by PostgreSQL, not by ingestion
 
 
 def test_startup_guard_accepts_matching_model_metadata_and_vector_column() -> None:

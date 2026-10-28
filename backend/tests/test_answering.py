@@ -1,4 +1,4 @@
-"""Offline tests for scoped retrieval, quote-verified claims, streaming, and follow-ups."""
+"""Offline tests for hybrid retrieval, quote-verified claims, streaming, and follow-ups."""
 
 from __future__ import annotations
 
@@ -30,7 +30,10 @@ from app.answering import (
     answer_prompt,
     answer_question,
     condensation_prompt,
+    fuse_rankings,
+    keyword_query,
     list_courses,
+    select_evidence,
 )
 from app.config import Settings
 
@@ -67,12 +70,17 @@ def _row(
 
 
 class _Sessions:
-    """Records the compiled query and returns the given rows ordered by distance."""
+    """Records the compiled queries and returns the given rows ordered by distance.
+
+    ``sql`` and ``params`` describe the first query (the vector search when answering);
+    ``statements`` holds every query in order.
+    """
 
     def __init__(self, rows: list[SimpleNamespace]) -> None:
         self.rows = rows
         self.sql = ""
         self.params: dict[str, Any] = {}
+        self.statements: list[str] = []
 
     def __call__(self) -> AbstractContextManager[Any]:
         sessions = self
@@ -86,8 +94,10 @@ class _Sessions:
 
             def execute(self, statement: Any) -> Any:
                 compiled = statement.compile(dialect=cast(Any, postgresql).dialect())
-                sessions.sql = str(compiled)
-                sessions.params = dict(compiled.params)
+                sessions.statements.append(str(compiled))
+                if not sessions.sql:
+                    sessions.sql = str(compiled)
+                    sessions.params = dict(compiled.params)
                 rows = sorted(sessions.rows, key=lambda row: getattr(row, "distance", 0))
                 return SimpleNamespace(all=lambda: rows)
 
@@ -255,8 +265,10 @@ def test_scope_filters_in_sql_before_ranking(scope: Scope, fragment: str) -> Non
         generation_provider=_Generator(_claims({"text": "x", "sources": [{"id": "S1"}]})),
     )
 
-    assert fragment in sessions.sql
-    assert sessions.sql.index("WHERE") < sessions.sql.index("ORDER BY")
+    vector_sql, keyword_sql = sessions.statements
+    for sql in (vector_sql, keyword_sql):
+        assert fragment in sql
+        assert sql.index("WHERE") < sql.index("ORDER BY")
 
 
 def test_unscoped_search_has_no_filter() -> None:
@@ -265,7 +277,11 @@ def test_unscoped_search_has_no_filter() -> None:
         session_factory=cast(sessionmaker[Session], sessions),
         generation_provider=_Generator(_claims({"text": "x", "sources": [{"id": "S1"}]})),
     )
-    assert "WHERE" not in sessions.sql
+    vector_sql, keyword_sql = sessions.statements
+    assert "WHERE" not in vector_sql
+    # The keyword search's only condition is the full-text match itself.
+    where = keyword_sql[keyword_sql.index("WHERE") : keyword_sql.index("ORDER BY")]
+    assert "@@" in where and "course_id =" not in where and "subject =" not in where
 
 
 def test_follow_up_questions_are_rewritten_before_searching() -> None:
@@ -441,3 +457,104 @@ def test_retrieval_drops_excerpts_below_the_cutoff_and_numbers_the_rest() -> Non
     assert [(item.label, item.chunk_id) for item in evidence] == [(1, CHUNK_A)]
     assert evidence[0].score == pytest.approx(0.8)
     assert "LIMIT" in sessions.sql and 8 in sessions.params.values()  # limited in SQL
+
+
+def test_rank_fusion_favours_passages_both_searches_find() -> None:
+    a, b, c = (UUID(int=value) for value in (1, 2, 3))
+    # a is first in one ranking only; b and c are found by both searches, so they win.
+    assert fuse_rankings([[a, b, c], [b, c]]) == [b, c, a]
+    assert fuse_rankings([[], []]) == []
+    assert fuse_rankings([[a, b], [b, a]], tie_break={a: 0.1, b: 0.9}) == [b, a]
+
+
+def test_keyword_query_keeps_only_words_so_user_text_cannot_inject_syntax() -> None:
+    assert keyword_query("Que fait vMotion ? (mode CBC) & !x | 'y'") == (
+        "Que | fait | vMotion | mode | CBC"
+    )
+    assert keyword_query("RSA RSA rsa") == "RSA | rsa"  # PostgreSQL lowercases later
+    assert keyword_query("? ! &") is None
+
+
+def _candidate(chunk_id: UUID, *, score: float, rerank: float | None) -> Evidence:
+    return Evidence(
+        label=9,
+        chunk_id=chunk_id,
+        document_id=DOCUMENT,
+        subject="Général",
+        course_id="Cryptographie",
+        document_title=None,
+        section_title=None,
+        source_filename="Cryptographie/slides.pdf",
+        page=1,
+        excerpt="x",
+        score=score,
+        rerank_score=rerank,
+    )
+
+
+def test_reranked_evidence_abstains_when_even_the_best_candidate_is_irrelevant() -> None:
+    off_topic = [_candidate(CHUNK_A, score=0.45, rerank=0.002)]  # cosine alone would pass
+    assert select_evidence(off_topic, limit=8, minimum_score=0.4, rerank_minimum_score=0.005) == []
+
+
+def test_reranked_evidence_keeps_candidates_passing_either_cutoff_in_order() -> None:
+    weak_both = UUID(int=3)
+    candidates = [
+        _candidate(CHUNK_B, score=0.30, rerank=0.90),  # reranker says relevant
+        _candidate(CHUNK_A, score=0.60, rerank=0.001),  # cosine says relevant
+        _candidate(weak_both, score=0.10, rerank=0.001),
+    ]
+    kept = select_evidence(candidates, limit=8, minimum_score=0.4, rerank_minimum_score=0.005)
+    assert [(item.label, item.chunk_id) for item in kept] == [(1, CHUNK_B), (2, CHUNK_A)]
+    assert (
+        len(select_evidence(candidates, limit=1, minimum_score=0.4, rerank_minimum_score=0.005))
+        == 1
+    )
+
+
+class _Reranker:
+    def __init__(self, scores: dict[str, float]) -> None:
+        self.scores = scores
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        self.calls.append((query, documents))
+        return [next((v for k, v in self.scores.items() if k in d), 0.0) for d in documents]
+
+
+def test_reranker_reads_each_candidate_with_its_source_and_reorders_them() -> None:
+    sessions = _Sessions(
+        [
+            _row(CHUNK_A, distance=0.10, text="Chiffrement de César.\nDécalage de 3."),
+            _row(CHUNK_B, distance=0.12, text="RSA : Rivest Shamir Adleman.\nn = pq."),
+        ]
+    )
+    reranker = _Reranker({"Rivest": 0.95, "César": 0.01})
+    generator = _Generator(_claims({"text": "x", "sources": [{"id": "S1"}]}))
+
+    answer = _answer(
+        session_factory=cast(sessionmaker[Session], sessions),
+        generation_provider=generator,
+        rerank_provider=reranker,
+    )
+
+    query, documents = reranker.calls[0]
+    assert query == "Comment fonctionne RSA ?"
+    assert documents[0].startswith(
+        "Cryptographie > Introduction à la cryptologie > RSA : un chiffrement asymétrique\n"
+    )
+    # The vector search ranks A first and the reranker ranks B first: the fused scores
+    # tie, and the reranker, which read the question with each passage, breaks the tie.
+    assert answer.citations[0].chunk_id == str(CHUNK_B)
+
+
+def test_off_topic_questions_are_refused_by_the_reranker_before_the_model_is_called() -> None:
+    generator = _Generator(_claims({"text": "x", "sources": [{"id": "S1"}]}))
+    with pytest.raises(NoEvidenceError):
+        _answer(
+            question="Quel temps fera-t-il demain ?",
+            generation_provider=generator,
+            rerank_provider=_Reranker({}),
+            settings=Settings(rerank_minimum_score=0.005, evidence_minimum_score=0.0),
+        )
+    assert generator.prompts == []

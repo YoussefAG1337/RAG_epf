@@ -47,17 +47,18 @@ Students ask questions about their courses and must get answers they can **trust
  .xlsx           │                      characters         (page, box)       context     │    + pgvector
                  └──────────────────────────────────────────────────────────────────────┘
 
- question ──► rewrite follow-up ──► embed ──► top 8 chunks in scope ──► cutoff 0.40 ──► Gemini:
- (web UI)     using the history     question   (cosine, HNSW)           (or "not found")  claims + quotes
-                                                                                              │
- viewer with highlighted lines ◄── citations with boxes ◄── verify quotes ◄── drop invalid ◄──┘
+ question ──► rewrite follow-up ──► vector search ─┐                                 Gemini:
+ (web UI)     using the history     (20, cosine)    ├─► rerank ─► fuse ─► cutoff ─► 8 ─► claims + quotes
+                                    keyword search ─┘   (cross-   rankings  (or "not      │
+                                    (20, full-text)      encoder)            found")       │
+ viewer with highlighted lines ◄── citations with boxes ◄── verify quotes ◄── drop invalid ◄┘
 ```
 
 Four services:
 
 | Service | Technology | Role |
 |---|---|---|
-| Embeddings | Python, sentence-transformers, PyTorch (Metal/CUDA/CPU) | Serves the Qwen3-Embedding-0.6B model over HTTP (`POST /embed`) |
+| Models | Python, sentence-transformers, PyTorch (Metal/CUDA/CPU) | Serves the Qwen3-Embedding-0.6B model (`POST /embed`) and the bge-reranker-v2-m3 reranker (`POST /rerank`) over HTTP |
 | Database | PostgreSQL 16 + pgvector | Documents, chunks with vectors and source locations, conversations |
 | API | Python 3.12, FastAPI, SQLAlchemy 2, Alembic, PyMuPDF | Ingestion, retrieval, answering, conversations, document files |
 | Web | Next.js 15, React 19, Tailwind CSS 4, react-pdf (pdf.js), KaTeX | French interface: library, chat, document viewer |
@@ -73,6 +74,7 @@ The project went through these stages; each fixed a problem found by testing the
 5. **Gemini answering and robustness.** Gemini's free tier imposed quotas and overload errors: batched embeddings, fallback models, measured relevance cutoff.
 6. **Local embeddings.** To remove the embedding quota, candidate local models were benchmarked on the course material and Qwen3-Embedding-0.6B was selected (section 5). It then moved from Docker to native execution to use the Apple GPU (11× faster).
 7. **Exact citations and the new interface.** Source line locations at ingestion, verified verbatim quotes, highlight boxes, a PDF viewer, document-scoped questions, saved conversations, follow-up rewriting, streaming — then verified end to end in a real browser.
+8. **Hybrid search and reranking.** A French full-text keyword search was added next to the vector search, and a cross-encoder reranker re-sorts their candidates. Several recipes were measured on the paraphrase questions and on a new set of exact-term questions before one was chosen (section 7).
 
 ## 4. Course material and ingestion
 
@@ -201,23 +203,45 @@ Measured on an Apple M4 Pro, embedding the 364 chunks:
 | Table | Content |
 |---|---|
 | `documents` | id, subject, course, title, source path, SHA-256 checksum, page count, embedding provider |
-| `document_chunks` | id, document, course, page, position, section path, text, **locations** (JSONB), **embedding** (`vector(1024)`) |
+| `document_chunks` | id, document, course, page, position, section path, text, **locations** (JSONB), **embedding** (`vector(1024)`), **search_vector** (`tsvector`, generated) |
 | `embedding_schema_metadata` | the model name and vector size the column was built for |
 | `conversations` | id, title, scope (JSONB), timestamps |
 | `messages` | conversation, position, role, content, payload (JSONB: claims, citations, status) |
 
-The index `ix_chunks_embedding_hnsw` uses `vector_cosine_ops`. Cosine similarity is used because the model's vectors are normalized and trained for it. Migrations are managed with Alembic (`backend/alembic/versions`); at startup the API checks that the database was built for the configured model and vector size.
+The index `ix_chunks_embedding_hnsw` uses `vector_cosine_ops`; `ix_chunks_search_vector` is a GIN index on the full-text column (section 7). Cosine similarity is used because the model's vectors are normalized and trained for it. Migrations are managed with Alembic (`backend/alembic/versions`); at startup the API checks that the database was built for the configured model and vector size.
 
-## 7. Retrieval
+## 7. Retrieval: hybrid search and reranking
 
 1. **Follow-up rewriting** (section 10): "Et pour AES ?" becomes "Comment fonctionne le chiffrement AES ?" before searching.
-2. **Embed the question** with the query convention.
-3. **Search in scope**: the SQL query filters by subject, course, or document, orders by cosine distance using the HNSW index, and keeps the **8 best chunks**.
-4. **Relevance cutoff 0.40**: chunks below it are discarded; if none remain, the answer is "Je n'ai pas trouvé cette information dans les supports de cours" and no LLM call is made.
+2. **Two searches in scope**, both filtered by subject, course or document in SQL before ranking:
+   - **Vector search**: the 20 chunks closest to the question's embedding (cosine distance). It finds passages with the same meaning in other words ("migrer une VM à chaud" → vMotion).
+   - **Keyword search**: the 20 best matches of PostgreSQL full-text search. Each chunk has a generated `tsvector` column (French stemming, stop words removed, section title weighted above the body), indexed with GIN. The question becomes an OR of its words, keeping only word characters so user text cannot inject query syntax. It finds exact terms that the vector search can rank poorly: acronyms, algorithm and product names ("ECB", "Kerckhoffs", "DRS").
+3. **Reranking**: a cross-encoder (`BAAI/bge-reranker-v2-m3`, multilingual, served by the model service) reads the question together with each of the up to 40 candidates, preceded by its course, document and section, and scores how well it answers, from 0 to 1.
+4. **Fusion**: the final order is the reciprocal rank fusion (k = 60) of the vector ranking and the reranker ranking; ties are broken by the reranker score.
+5. **Relevance cutoff 0.005 on the best reranker score**: if even the best candidate scores below it, the answer is "Je n'ai pas trouvé cette information dans les supports de cours" and no LLM call is made. Otherwise the **8 best chunks** that pass either the reranker cutoff or the cosine cutoff (0.40) are kept.
 
-*Why 8 chunks:* measured — the right passage is within the top 8 for 100 % of the test questions (top 3: 97 %). Fewer would miss some; more would dilute the prompt and cost tokens.
+*Why a cross-encoder reranker:* the embedding model encodes the question and each passage separately, so it can only compare two summaries. A cross-encoder reads both together and judges whether the passage answers the question. It is too slow to run over the whole corpus (about 1 s for 40 passages on the Apple GPU), hence the two fast searches first. bge-reranker-v2-m3 was chosen because it is multilingual (French courses, French and English questions), runs locally like the embedding model, and has no quota.
 
-*Why 0.40:* measured with `python -m app.evaluate`. The right passages of answerable questions score at least 0.447 (the lowest being English questions about French slides), while 4 of 5 off-topic questions score at most 0.35. The fifth ("Quel temps fera-t-il demain à Paris ?", 0.452) matched a spreadsheet of flight data; it passes the cutoff but the LLM then refuses it (section 8). The cutoff is therefore set to never lose an answerable question, and the LLM is the second safeguard.
+*How the recipe was chosen (measured with `python -m app.evaluate`).* The 30 paraphrase questions were complemented by **12 exact-term questions** typed the way a student would ("mode ECB", "DRS", "masque jetable"); each target is a passage of the right file containing the term. Each candidate recipe was compared on both sets:
+
+| Recipe | Paraphrases MRR | in top 8 | Exact terms MRR | first |
+|---|---|---|---|---|
+| Vector search alone (previous version) | 0.908 | 30/30 | 0.938 | 11/12 |
+| Keyword search alone | 0.678 | 24/30 | 0.757 | 7/12 |
+| Vector + keyword, fused | 0.766 | 29/30 | 1.000 | 12/12 |
+| Reranker alone on the candidates | 0.856 | 29/30 | 1.000 | 12/12 |
+| **Vector + reranker fused, keyword adds candidates (chosen)** | **0.893** | **30/30** | **1.000** | **12/12** |
+
+- Fusing the keyword ranking directly hurts paraphrase questions: an OR of all the question's words matches many passages by common words. Its value is the candidates it adds, so it contributes to the pool but has no vote in the final order.
+- The reranker alone was wrong on some English questions about French slides ("How does RSA key generation work?" scored every passage under 0.06). Fusing its ranking with the vector ranking cushions those errors.
+- Some of the reranker's "misses" are better answers than the evaluation's expected passage. For "différence entre moyenne et médiane" it chose the glossary line defining both; for "Quand faut-il rejeter l'hypothèse nulle ?", rows stating "If p>0,05 do not reject the null hypothesis". The evaluation counts one expected source, so the paraphrase MRR understates the reranker.
+- The chosen recipe keeps the right passage among the 8 excerpts for every question in both sets, and ranks first every exact-term question.
+
+*Why 0.005 on the best reranker score:* the best candidate of every answerable question (42) scores at least 0.013 (median 0.91), and the best candidate of every off-topic question at most 0.0017. The cutoff sits between them on a log scale. Cosine similarity could not separate them: an off-topic question reached 0.452 ("Quel temps fera-t-il demain à Paris ?", through a spreadsheet of flight data), while some exact-term questions score below 0.40. With the old cosine cutoff, "DRS" and "masque jetable" were refused before reaching the model; with the reranker cutoff both are answered and the weather question is refused at retrieval.
+
+*Why 8 chunks:* measured: the right passage is within the top 8 for every test question. Fewer would miss some; more would dilute the prompt and cost tokens.
+
+*Without the reranker* (`RERANK_PROVIDER=none`), the vector and keyword rankings are fused and the cosine cutoff 0.40 applies, which was measured for the embedding model alone: right passages of paraphrase questions score at least 0.447, 4 of 5 off-topic questions at most 0.35.
 
 ## 8. Answer generation and the LLM prompt
 
@@ -328,12 +352,12 @@ French, three panes:
 
 ## 14. Evaluation and testing
 
-**Retrieval** (`python -m app.evaluate`, 30 questions): right passage first 83 %, in the top 3 97 %, in the top 8 100 %, MRR 0.908.
+**Retrieval** (`python -m app.evaluate`, hybrid search + reranking, 20 candidates per search): on the 30 paraphrase questions, right passage first 83 %, in the top 3 93 %, in the top 8 100 %, MRR 0.893; on the 12 exact-term questions, right passage first 12 of 12. Vector search alone, the previous version, had MRR 0.908 on the paraphrases but found only 11 of 12 exact terms first (section 7).
 
 **Answers** (`--answers`, same questions + 5 off-topic): 28 of 30 answerable questions answered; all 5 off-topic questions refused; 41 of 41 citations with a verified quote. The two misses: a question whose only material is spreadsheet rows (the model refused rather than extrapolate) and one generation that failed when every Gemini model was busy.
 
 **Automated tests**:
-- Backend: 129 tests (parsing on generated PDFs, chunking, locating, prompt construction, retrieval cutoff, quote verification, answering, API, providers, configuration), including 4 integration tests that create a throwaway PostgreSQL database, apply the migrations, import a document, query it in a narrow scope, and check conversation history.
+- Backend: 142 tests (parsing on generated PDFs, chunking, locating, prompt construction, hybrid search, reranking and cutoffs, quote verification, answering, API, providers, configuration), including 5 integration tests that create a throwaway PostgreSQL database, apply the migrations, import a document, query it in a narrow scope (vector and keyword search), and check conversation history.
 - Frontend: 24 tests (stream contract validation, chat state, inline math rendering, the workspace flows).
 - Browser: an end-to-end script drives a real Chromium browser through the interface (ask, open a citation and check the highlight boxes and the panel layout, follow-up, reload, document scope, Markdown citation visible, off-topic refusal, no console errors) — 12/12 checks.
 - Lint, format and type checks: ruff (lint and format), mypy (strict), ESLint, TypeScript.
@@ -346,7 +370,7 @@ French, three panes:
 - **Deleted files**: removing a course file does not remove its passages from the index; only changed files are replaced. A synchronisation step (delete documents whose file is gone) is the next step.
 - **Free tier**: answer generation depends on the provider's quotas; heavy use needs a paid key or a local LLM. A full `--answers` evaluation (35 questions) can exhaust the Gemini free tier's per-minute quota, which shows up as errors, not as wrong answers.
 - **Evaluation size**: 30 questions give a useful signal but not statistical certainty; the question set should grow with the courses (`backend/eval/questions.json`).
-- **Keyword search**: a hybrid search (BM25 + vectors) could help exact terms such as course codes.
+- **Reranking cost**: reranking adds about 1 s per question on the Apple GPU, more on a CPU. A smaller reranker would be faster, but would need to be measured the same way.
 
 ## 16. Decision summary
 
@@ -360,7 +384,10 @@ French, three panes:
 | Embedding runtime | Native, GPU, float16 | Docker CPU | 11× faster (31 s vs ~350 s) |
 | Vector database | PostgreSQL + pgvector (HNSW, cosine) | Qdrant, Chroma, Pinecone | One store for relational data and vectors; scope filters in SQL |
 | Excerpts per question | 8 | 3–20 | 100 % of right passages within 8 |
-| Relevance cutoff | 0.40 | 0.35–0.60 | Measured: keeps every answerable question; LLM refuses the rest |
+| Keyword search | PostgreSQL full-text (French `tsvector`, GIN), adds candidates | BM25 extension; no keyword search | Exact terms ranked first (12/12); no extra service |
+| Reranker | bge-reranker-v2-m3 cross-encoder, local | No reranker; reranker alone | Separates off-topic questions (0.0017 vs 0.013); cross-checked by the vector vote |
+| Final order | Fusion of vector and reranker rankings | Fusion of all three; reranker only | Best on both question sets; keeps 100 % within 8 |
+| Relevance cutoff | 0.005 on the best reranker score | Cosine 0.40 (previous) | Clean gap, where cosine overlapped; fewer wrongful refusals |
 | Answer model | Gemini 3.8 Flash + fallbacks | Larger models, local LLM | Free tier, speed, French quality, JSON + streaming |
 | Answer format | JSON claims with labelled sources and verbatim quotes | Free text with [1] markers | Server-side verification and exact highlighting |
 | Follow-ups | Rewrite into a standalone question before searching | Search with the raw question | Pronouns and ellipses carry no searchable meaning |

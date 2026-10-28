@@ -16,6 +16,12 @@ EMBEDDING_DIMENSIONS = 1024
 # are the lowest), most off-topic questions <= 0.35. Borderline excerpts that pass are still
 # refused by the answer model when they do not answer the question.
 LOCAL_MINIMUM_SCORE = 0.40
+# Cross-encoder served next to the embedding model; it re-sorts the hybrid search results.
+RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+# Reranker cutoff for RERANK_MODEL, measured on the course material (python -m app.evaluate):
+# the best candidate of every answerable question scores >= 0.013, of every off-topic
+# question <= 0.0017. 0.005 sits between the two on a log scale.
+LOCAL_RERANK_MINIMUM_SCORE = 0.005
 # The repository's .env, whichever directory a command is started from. Containers have no
 # such file: compose.yaml passes their settings as environment variables.
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -65,6 +71,16 @@ class Settings(BaseSettings):
     embedding_model: str = EMBEDDING_MODEL
     embedding_dimensions: int = EMBEDDING_DIMENSIONS
     retrieval_limit: int = 8
+    # Hybrid search: candidates proposed by the vector search and by the keyword search
+    # each; all of them are reranked (so at most twice this many).
+    retrieval_candidates: int = 20
+    keyword_search: bool = True
+    # "auto" follows EMBEDDING_PROVIDER (the local service reranks); "none" fuses the vector
+    # and keyword rankings without reranking.
+    rerank_provider: Literal["auto", "local", "deterministic", "none"] = "auto"
+    rerank_model: str = RERANK_MODEL
+    # Unset means "use the reranker default" (see rerank_cutoff).
+    rerank_minimum_score: float | None = None
     # Previous turns (user + assistant messages) given to the model for follow-up questions.
     conversation_history_messages: int = 6
     # Unset means "use the provider default" (see minimum_score).
@@ -102,6 +118,10 @@ class Settings(BaseSettings):
             raise ValueError("answer_temperature must be between 0 and 2")
         if self.retrieval_limit < 1:
             raise ValueError("retrieval_limit must be greater than zero")
+        if not self.retrieval_limit <= self.retrieval_candidates <= 32:
+            raise ValueError("retrieval_candidates must be between retrieval_limit and 32")
+        if self.rerank_minimum_score is not None and not 0.0 <= self.rerank_minimum_score <= 1.0:
+            raise ValueError("rerank_minimum_score must be between zero and one")
         if self.evidence_minimum_score is not None and not (
             0.0 <= self.evidence_minimum_score <= 1.0
         ):
@@ -117,6 +137,20 @@ class Settings(BaseSettings):
         return tuple(
             name.strip() for name in self.answer_fallback_models.split(",") if name.strip()
         )
+
+    @property
+    def reranker(self) -> Literal["local", "deterministic", "none"]:
+        if self.rerank_provider == "auto":
+            return self.embedding_provider
+        return self.rerank_provider
+
+    @property
+    def rerank_cutoff(self) -> float:
+        """Reranker relevance below which a candidate is dropped (explicit or default)."""
+
+        if self.rerank_minimum_score is not None:
+            return self.rerank_minimum_score
+        return LOCAL_RERANK_MINIMUM_SCORE if self.reranker == "local" else 0.1
 
     @property
     def minimum_score(self) -> float:

@@ -13,10 +13,15 @@ from pydantic import SecretStr
 from app.providers.deterministic import (
     DeterministicEmbeddingProvider,
     DeterministicGenerationProvider,
+    DeterministicRerankProvider,
 )
 from app.providers.gemini import GeminiGenerationProvider
 from app.providers.groq import GroqGenerationProvider
-from app.providers.local import EmbeddingServiceError, LocalEmbeddingProvider
+from app.providers.local import (
+    EmbeddingServiceError,
+    LocalEmbeddingProvider,
+    LocalRerankProvider,
+)
 from app.providers.protocols import ProviderConfigurationError, ProviderUnavailableError
 
 
@@ -115,6 +120,61 @@ def test_local_provider_reports_an_unreachable_service() -> None:
 
     with pytest.raises(EmbeddingServiceError, match="ConnectError"):
         asyncio.run(_service(refuse).embed("question"))
+
+
+def _reranker(handler: Any) -> LocalRerankProvider:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return LocalRerankProvider(
+        "http://embeddings:8080/", model="BAAI/bge-reranker-v2-m3", client=client
+    )
+
+
+def test_local_reranker_sends_the_question_with_every_passage() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append({"url": str(request.url), **json.loads(request.content)})
+        return httpx.Response(200, json={"model": "BAAI/bge-reranker-v2-m3", "scores": [0.9, 0.1]})
+
+    async def verify() -> None:
+        provider = _reranker(handler)
+        assert await provider.rerank("RSA ?", ["RSA : Rivest", "César"]) == [0.9, 0.1]
+        assert await provider.rerank("RSA ?", []) == []  # nothing to send
+        await provider.aclose()
+
+    asyncio.run(verify())
+    assert requests == [
+        {
+            "url": "http://embeddings:8080/rerank",
+            "query": "RSA ?",
+            "documents": ["RSA : Rivest", "César"],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (httpx.Response(200, json={"model": "other/model", "scores": [0.5]}), "'other/model'"),
+        (httpx.Response(200, json={"model": "BAAI/bge-reranker-v2-m3", "scores": []}), "number"),
+        (httpx.Response(404, json={"detail": "disabled"}), "HTTPStatusError"),
+    ],
+)
+def test_local_reranker_rejects_wrong_models_counts_and_failures(
+    response: httpx.Response, message: str
+) -> None:
+    with pytest.raises(EmbeddingServiceError, match=message):
+        asyncio.run(_reranker(lambda _request: response).rerank("q", ["passage"]))
+
+
+def test_deterministic_reranker_scores_shared_question_terms() -> None:
+    scores = asyncio.run(
+        DeterministicRerankProvider().rerank(
+            "Comment fonctionne le chiffrement RSA ?",
+            ["Le chiffrement RSA repose sur la factorisation.", "Recette de crêpes"],
+        )
+    )
+    assert scores[0] > 0.5 and scores[1] == 0.0
 
 
 class _Models:

@@ -30,7 +30,7 @@ else
     echo "uv is required to run the embedding model natively: brew install uv" >&2
     exit 1
   fi
-  echo "Starting the embedding model natively (first start downloads it, ~1.2 GB)…"
+  echo "Starting the embedding model and reranker natively (first start downloads them, ~3.5 GB)…"
   nohup uv run --quiet --python 3.12 --with-requirements embeddings/requirements.txt \
     uvicorn --app-dir embeddings service:app --host 127.0.0.1 --port "${PORT}" \
     >.run/embeddings.log 2>&1 &
